@@ -1,0 +1,100 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Echo",
+  "version": "1.0.0",
+  "identifier": "com.yijuntuqi.echo",
+  "build": {
+    "beforeDevCommand": "pnpm dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "pnpm build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Echo",
+        "label": "main",
+        "url": "/",
+        "width": 1200,
+        "height": 800,
+        "minWidth": 800,
+        "minHeight": 600,
+        "resizable": true,
+        "fullscreen": false,
+        "decorations": true,
+        "transparent": false,
+        "visible": false
+      },
+      {
+        "label": "pet",
+        "url": "pet.html",
+        "width": 200,
+        "height": 200,
+        "minWidth": 160,
+        "minHeight": 160,
+        "maxWidth": 300,
+        "maxHeight": 300,
+        "resizable": false,
+        "fullscreen": false,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "visible": false,
+        "titleBarStyle": "overlay"
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self' data: blob:; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' https://api.chatanywhere.tech https://hf-mirror.com;"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "windows": {
+      "nsis": {
+        "installerIcon": "icons/icon.ico",
+        "licenseFile": "LICENSE",
+        "welcomeMessage": "欢迎安装 Echo - 你的 AI 电子宠物",
+        "displayLanguageSelector": false
+      },
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper"
+      }
+    },
+    "android": {
+      "minSdkVersion": 26,
+      "targetSdkVersion": 34,
+      "versionCode": 1,
+      "permissions": [
+        "INTERNET",
+        "FOREGROUND_SERVICE",
+        "POST_NOTIFICATIONS",
+        "RECEIVE_BOOT_COMPLETED",
+        "WAKE_LOCK"
+      ]
+    }
+  },
+  "plugins": {
+    "shell": {
+      "allowlist": [
+        { "name": "open", "cmd": "open", "args": true },
+        { "name": "xdg-open", "cmd": "xdg-open", "args": true }
+      ]
+    },
+    "updater": {
+      "endpoints": ["https://api.github.com/repos/yijuntuqi/Echo/releases/latest"],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IHRoaXMga2V5IGlzIG5vdCB1c2VkIGZvciBwcm9kdWN0aW9uLg==",
+      "windows": {
+        "installMode": "passive"
+      }
+    }
+  }
+}

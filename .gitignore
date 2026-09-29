@@ -1,0 +1,70 @@
+# Rust
+/target/
+**/*.rs.bk
+Cargo.lock
+
+# Node
+node_modules/
+.pnpm-store/
+dist/
+build/
+*.local
+
+# Tauri
+src-tauri/target/
+src-tauri/gen/
+**/*.d.ts
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+logs/
+
+# Database
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+
+# Models (downloaded at runtime)
+src-tauri/resources/models/
+*.safetensors
+tokenizer.json
+config.json
+
+# Backup files
+*.backup
+*.echo.backup
+
+# Temporary
+tmp/
+temp/
+*.tmp
+
+# Coverage
+coverage/
+*.lcov
+
+# Test
+test-results/
+playwright-report/
+
+# Misc
+*.pid
+*.seed
+*.pid.lock

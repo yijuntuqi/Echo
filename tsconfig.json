@@ -1,0 +1,28 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "useDefineForClassFields": true,
+    "module": "ESNext",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "moduleResolution": "bundler",
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noEmit": true,
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    "allowImportingTsExtensions": true,
+    "baseUrl": ".",
+    "paths": {
+      "$lib/*": ["src/lib/*"],
+      "$api/*": ["src/lib/api/*"],
+      "$components/*": ["src/lib/components/*"],
+      "$stores/*": ["src/lib/stores/*"],
+      "$styles/*": ["src/lib/styles/*"],
+      "$utils/*": ["src/lib/utils/*"]
+    }
+  },
+  "include": ["src/**/*", "src-tauri/**/*.d.ts"],
+  "exclude": ["node_modules", "dist", "build"]
+}
