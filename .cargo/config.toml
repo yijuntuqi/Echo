@@ -1,0 +1,3 @@
+[build]
+# E: is a removable drive; compile there and a dropout kills the build (os error 433).
+target-dir = "D:/cargo-target/echo"

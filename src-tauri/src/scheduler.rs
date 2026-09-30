@@ -64,7 +64,9 @@ impl Scheduler {
 
         match built {
             Ok(job) => {
-                sched.add(job).await;
+                // A registration failure (clock source missing, …) must not
+                // abort the remaining jobs.
+                let _ = sched.add(job).await;
                 tracing::info!(job = name, "scheduled");
                 Ok(())
             }

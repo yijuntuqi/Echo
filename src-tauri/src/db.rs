@@ -321,5 +321,10 @@ pub async fn update_settings(patch: serde_json::Value) -> Result<(), String> {
         .execute(pool)
         .await
         .map_err(|e| e.to_string())?;
+
+    // A swapped key takes effect on the next message without a restart.
+    if patch.get("user_api_key").is_some() {
+        crate::onboarding::apply_chat_key_from_db(pool).await;
+    }
     Ok(())
 }

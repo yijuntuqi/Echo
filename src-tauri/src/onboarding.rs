@@ -94,6 +94,9 @@ pub async fn complete_onboarding(
     // Background services need the pool, so start them only now.
     let _ = crate::state().scheduler.start().await;
 
+    // The key the user just typed (or left blank) becomes live immediately.
+    apply_chat_key_from_db(pool).await;
+
     crate::window::show_main_window(&app);
     Ok(())
 }
@@ -150,5 +153,25 @@ pub async fn open_existing(app: &AppHandle) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     let _ = crate::state().db.set(manager.pool().clone());
     let _ = crate::state().db_path.set(manager.path().to_path_buf());
+    apply_chat_key_from_db(manager.pool()).await;
     Ok(())
+}
+
+/// Push the stored `user_api_key` (if any) into the chat engine.
+///
+/// Best-effort: a malformed settings blob must not block startup.
+pub async fn apply_chat_key_from_db(pool: &crate::db::DbPool) {
+    let key: Option<String> = sqlx::query("SELECT settings_json FROM profiles WHERE id = 1")
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|row| {
+            use sqlx::Row;
+            let json: String = row.get("settings_json");
+            serde_json::from_str::<Settings>(&json)
+                .ok()
+                .and_then(|s| s.user_api_key)
+        });
+    crate::chat::apply_key(&crate::state().chat, key.as_deref()).await;
 }
