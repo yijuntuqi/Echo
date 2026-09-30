@@ -344,9 +344,148 @@ impl ChatEngine {
             completion_tokens,
         })
     }
+
+    /// One non-streaming completion. Single attempt — callers own retry
+    /// policy. Used by background work (classification, recaps, greetings)
+    /// where there is nothing to stream to.
+    pub async fn complete(
+        &self,
+        messages: Vec<ChatMessage>,
+        use_premium: bool,
+    ) -> Result<CompletionOutcome, ChatError> {
+        let cfg = self.config();
+        if cfg.api_key.is_empty() {
+            return Err(ChatError::NotConfigured);
+        }
+        let model = self.model_for(use_premium);
+        let body = serde_json::json!({
+            "model": model,
+            "messages": messages,
+            "max_tokens": cfg.max_tokens,
+            "temperature": cfg.temperature,
+        });
+        let url = format!("{}/chat/completions", cfg.base_url.trim_end_matches('/'));
+
+        let response = self
+            .client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", cfg.api_key))
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| ChatError::Network(e.to_string()))?;
+
+        let status = response.status().as_u16();
+        let text = response
+            .text()
+            .await
+            .map_err(|e| ChatError::Network(e.to_string()))?;
+        if status >= 400 {
+            return Err(ChatError::Api { status, body: text });
+        }
+
+        let (reply, prompt_tokens, completion_tokens) = parse_completion(&text)?;
+        Ok(CompletionOutcome { reply, model, prompt_tokens, completion_tokens })
+    }
 }
 
 use futures_util::StreamExt;
+
+/// Parse one non-streaming completion response into
+/// `(reply, prompt_tokens, completion_tokens)`.
+///
+/// `reasoning_content` is dropped exactly like the streaming parser drops it;
+/// a `null` content counts as empty; an `error` payload becomes
+/// [`ChatError::Api`] with the HTTP status (200 — the failure is in the body).
+fn parse_completion(body: &str) -> Result<(String, Option<u32>, Option<u32>), ChatError> {
+    let value: serde_json::Value =
+        serde_json::from_str(body).map_err(|e| ChatError::Api { status: 200, body: e.to_string() })?;
+    if value.get("error").is_some() {
+        return Err(ChatError::Api { status: 200, body: body.to_string() });
+    }
+    let reply = value
+        .pointer("/choices/0/message/content")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let usage = value.get("usage");
+    let prompt = usage.and_then(|u| u.get("prompt_tokens")).and_then(|v| v.as_u64()).map(|v| v as u32);
+    let completion = usage
+        .and_then(|u| u.get("completion_tokens"))
+        .and_then(|v| v.as_u64())
+        .map(|v| v as u32);
+    Ok((reply, prompt, completion))
+}
+
+/// Persist one finished turn: the conversation row (with the emotional read,
+/// or NULLs when neither pass produced one) and, on a real read, today's mood
+/// (latest turn of the day wins — the table is UNIQUE on date).
+///
+/// Best-effort by contract: failures are logged, never propagated, so a
+/// storage hiccup cannot undo a reply the user already has. Returns the
+/// `mood:updated` payload when today's mood changed.
+pub(crate) async fn persist_turn(
+    pool: &crate::db::DbPool,
+    user_message: &str,
+    outcome: &CompletionOutcome,
+    read: Option<&crate::emotion::EmotionResult>,
+) -> Option<MoodUpdated> {
+    let tokens = outcome
+        .prompt_tokens
+        .zip(outcome.completion_tokens)
+        .map(|(p, c)| (p + c) as i32);
+    let (emotion, weight, topics) = match read {
+        Some(r) => (
+            Some(r.emotion.as_str()),
+            Some(r.confidence as f64),
+            Some(serde_json::to_string(&r.topics).unwrap_or_else(|_| "[]".into())),
+        ),
+        None => (None, None, None),
+    };
+
+    if let Err(e) = sqlx::query(
+        "INSERT INTO conversations
+             (user_message, ai_reply, emotion, emotion_weight, topics, tokens_used, model_used)
+         VALUES (?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(user_message)
+    .bind(&outcome.reply)
+    .bind(emotion)
+    .bind(weight)
+    .bind(&topics)
+    .bind(tokens)
+    .bind(&outcome.model)
+    .execute(pool)
+    .await
+    {
+        tracing::warn!("conversation insert failed: {e}");
+    }
+
+    let read = read?;
+    let date = chrono::Local::now().date_naive().to_string();
+    if let Err(e) = sqlx::query(
+        "INSERT INTO moods (date, emotion, weight, source) VALUES (?, ?, ?, 'auto')
+         ON CONFLICT(date) DO UPDATE SET emotion = excluded.emotion, weight = excluded.weight",
+    )
+    .bind(&date)
+    .bind(read.emotion.as_str())
+    .bind(read.confidence as f64)
+    .execute(pool)
+    .await
+    {
+        tracing::warn!("mood upsert failed: {e}");
+        return None;
+    }
+    Some(MoodUpdated { date, emotion: read.emotion, weight: read.confidence })
+}
+
+/// Payload of the `mood:updated` event (mirrored by `events.ts`).
+#[derive(serde::Serialize, Clone)]
+pub struct MoodUpdated {
+    pub date: String,
+    pub emotion: crate::emotion::Emotion,
+    pub weight: f32,
+}
 
 /// Install `user_api_key` as the active key, or fall back to the shared one.
 ///
@@ -423,29 +562,29 @@ pub async fn send_message(app: tauri::AppHandle, message: String) -> Result<(), 
         }
     };
 
+    // Classify before the done frame so the badge payload rides along with
+    // it. Never fails the turn: a classification miss just leaves the badge
+    // empty and the persisted columns NULL.
+    let read = crate::state()
+        .emotion
+        .classify(engine, &message, &outcome.reply)
+        .await;
+    let payload = read.as_ref().map(|r| EmotionPayload {
+        emotion: r.emotion,
+        weight: r.confidence,
+        topics: r.topics.clone(),
+    });
+
     app.emit(
         "chat:stream",
-        StreamChunk { delta: String::new(), done: true, emotion: None },
+        StreamChunk { delta: String::new(), done: true, emotion: payload },
     )
     .map_err(|e| e.to_string())?;
 
-    // The audit trail is best-effort: a failed insert must not undo the
-    // reply the user already received.
     if let Ok(pool) = pool() {
-        let tokens = outcome
-            .prompt_tokens
-            .zip(outcome.completion_tokens)
-            .map(|(p, c)| (p + c) as i32);
-        let _ = sqlx::query(
-            "INSERT INTO conversations (user_message, ai_reply, tokens_used, model_used)
-             VALUES (?, ?, ?, ?)",
-        )
-        .bind(&message)
-        .bind(&outcome.reply)
-        .bind(tokens)
-        .bind(&outcome.model)
-        .execute(pool)
-        .await;
+        if let Some(mood) = persist_turn(pool, &message, &outcome, read.as_ref()).await {
+            let _ = app.emit("mood:updated", mood);
+        }
     }
 
     Ok(())
@@ -712,5 +851,153 @@ mod tests {
         apply_key(&engine, None).await;
         assert_eq!(engine.config().api_key, SHARED_API_KEY);
         assert_eq!(engine.quota.remaining(200).await, 200);
+    }
+
+    #[test]
+    fn parse_completion_reads_reply_and_usage() {
+        let body = r#"{"choices":[{"message":{"role":"assistant","content":"你好呀"}}],
+                      "usage":{"prompt_tokens":5,"completion_tokens":3}}"#;
+        let (reply, prompt, completion) = parse_completion(body).unwrap();
+        assert_eq!(reply, "你好呀");
+        assert_eq!(prompt, Some(5));
+        assert_eq!(completion, Some(3));
+    }
+
+    #[test]
+    fn parse_completion_drops_reasoning_and_treats_null_content_as_empty() {
+        let body = r#"{"choices":[{"message":{"role":"assistant",
+                      "reasoning_content":"thinking...","content":null}}]}"#;
+        let (reply, prompt, completion) = parse_completion(body).unwrap();
+        assert_eq!(reply, "");
+        assert_eq!(prompt, None);
+        assert_eq!(completion, None);
+    }
+
+    #[test]
+    fn parse_completion_rejects_error_payload() {
+        let body = r#"{"error":{"code":"1210","message":"该模型始终思考"}}"#;
+        match parse_completion(body) {
+            Err(ChatError::Api { status: 200, body }) => assert!(body.contains("1210")),
+            other => panic!("expected Api error, got {other:?}"),
+        }
+    }
+
+    /// Like `spawn_server`, but also records every request body it receives.
+    async fn spawn_capturing_server(
+        responses: Vec<String>,
+    ) -> (u16, Arc<AtomicUsize>, Arc<std::sync::Mutex<Vec<String>>>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let hits = Arc::new(AtomicUsize::new(0));
+        let requests: Arc<std::sync::Mutex<Vec<String>>> = Default::default();
+
+        let (h2, r2) = (hits.clone(), requests.clone());
+        tokio::spawn(async move {
+            let mut responses = responses.into_iter().cycle();
+            while let Ok((mut sock, _)) = listener.accept().await {
+                let Some(resp) = responses.next() else { break };
+                h2.fetch_add(1, Ordering::SeqCst);
+                let mut buf = vec![0u8; 65536];
+                let n = sock.read(&mut buf).await.unwrap_or(0);
+                r2.lock().unwrap().push(String::from_utf8_lossy(&buf[..n]).into_owned());
+                let _ = sock.write_all(resp.as_bytes()).await;
+                let _ = sock.shutdown().await;
+            }
+        });
+        (port, hits, requests)
+    }
+
+    #[tokio::test]
+    async fn complete_omits_stream_field_and_makes_one_attempt() {
+        let body = r#"{"choices":[{"message":{"role":"assistant","content":"答"}}],
+                      "usage":{"prompt_tokens":1,"completion_tokens":2}}"#;
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+             Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let (port, hits, requests) = spawn_capturing_server(vec![response]).await;
+
+        let outcome = engine(port)
+            .complete(vec![ChatMessage::user("hi")], false)
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.reply, "答");
+        assert_eq!(outcome.prompt_tokens, Some(1));
+        assert_eq!(outcome.completion_tokens, Some(2));
+        assert_eq!(hits.load(Ordering::SeqCst), 1, "single attempt, no retry loop");
+        let sent = requests.lock().unwrap().concat();
+        assert!(!sent.contains("\"stream\""), "non-streaming request must not ask for a stream");
+    }
+
+    #[tokio::test]
+    async fn persist_turn_writes_conversation_mood_and_skips_synthetic_reads() {
+        let dir = std::env::temp_dir().join(format!("echo-chat-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let manager = crate::db::DbManager::open_at(dir.join("t.db"), "pw").await.unwrap();
+        let pool = manager.pool();
+
+        let outcome = CompletionOutcome {
+            reply: "好耶".into(),
+            model: "glm-5.3-flash".into(),
+            prompt_tokens: Some(3),
+            completion_tokens: Some(2),
+        };
+        let read = crate::emotion::EmotionResult {
+            emotion: crate::emotion::Emotion::Happy,
+            confidence: 0.8,
+            source: crate::emotion::Source::Hybrid,
+            topics: vec!["考试".into()],
+        };
+
+        // A real read lands everywhere and reports the mood update.
+        let mood = persist_turn(pool, "今天考完了", &outcome, Some(&read)).await;
+        assert!(mood.is_some());
+        let row: (Option<String>, Option<f64>, Option<String>) = sqlx::query_as(
+            "SELECT emotion, emotion_weight, topics FROM conversations ORDER BY id DESC LIMIT 1",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        assert_eq!(row.0.as_deref(), Some("happy"));
+        // Confidence is f32; through the REAL column it only round-trips
+        // approximately, so compare with a tolerance.
+        let stored = row.1.unwrap();
+        assert!((stored - 0.8).abs() < 1e-5, "stored {stored}");
+        assert_eq!(row.2.as_deref(), Some(r#"["考试"]"#));
+        let (emotion, weight): (String, f64) =
+            sqlx::query_as("SELECT emotion, weight FROM moods")
+                .fetch_one(pool)
+                .await
+                .unwrap();
+        assert_eq!(emotion, "happy");
+        assert!((weight - 0.8).abs() < 1e-5, "stored {weight}");
+
+        // A second turn the same day overwrites, not duplicates.
+        let read2 = crate::emotion::EmotionResult { emotion: crate::emotion::Emotion::Calm, confidence: 0.4, source: crate::emotion::Source::Hybrid, topics: vec![] };
+        persist_turn(pool, "静一静", &outcome, Some(&read2)).await.unwrap();
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM moods").fetch_one(pool).await.unwrap();
+        assert_eq!(count, 1);
+        let (emotion, weight): (String, f64) =
+            sqlx::query_as("SELECT emotion, weight FROM moods").fetch_one(pool).await.unwrap();
+        assert_eq!(emotion, "calm");
+        assert!((weight - 0.4).abs() < 1e-5, "stored {weight}");
+
+        // No read (both passes failed): NULLs, no mood row touched.
+        let count_before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM moods").fetch_one(pool).await.unwrap();
+        let mood = persist_turn(pool, "嗯", &outcome, None).await;
+        assert!(mood.is_none());
+        let row: (Option<String>, Option<f64>, Option<String>) = sqlx::query_as(
+            "SELECT emotion, emotion_weight, topics FROM conversations ORDER BY id DESC LIMIT 1",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        assert!(row.0.is_none() && row.1.is_none() && row.2.is_none());
+        let count_after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM moods").fetch_one(pool).await.unwrap();
+        assert_eq!(count_after, count_before);
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

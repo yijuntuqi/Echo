@@ -6,6 +6,7 @@
   import { getSettings, getOnboardingStatus } from '$lib/api/commands';
   import { on } from '$lib/api/events';
   import { settingsStore } from '$lib/stores/settings';
+  import { moodStore } from '$lib/stores/mood';
 
   import HomePage from './pages/HomePage.svelte';
   import DashboardPage from './pages/DashboardPage.svelte';
@@ -44,6 +45,13 @@
       });
       if (disposed) unlisten();
       else cleanups.push(unlisten);
+
+      // A finished turn carries today's emotional read; keep the heatmap live.
+      const unlistenMood = await on('mood:updated', (m) => {
+        moodStore.upsert({ date: m.date, emotion: m.emotion, weight: m.weight, source: 'auto' });
+      });
+      if (disposed) unlistenMood();
+      else cleanups.push(unlistenMood);
     })();
 
     return () => {

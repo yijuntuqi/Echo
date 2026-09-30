@@ -1,0 +1,16 @@
+node_modules/
+dist/
+build/
+target/
+*.lock
+*.log
+.git/
+.vscode/
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.svg
+*.ico
+*.woff
+*.woff2
