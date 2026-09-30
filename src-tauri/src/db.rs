@@ -108,9 +108,13 @@ impl DbManager {
         let opts = SqliteConnectOptions::new()
             .filename(&path)
             .create_if_missing(true)
-            .pragma("key", format!("x'{}'", hex_encode(&key)))
+            // SQLCipher's raw-key form needs the double quotes: the pragma
+            // value grammar accepts no blob literals, and the quotes are what
+            // tell SQLCipher the x'…' text is a raw key, not a passphrase.
+            // Same shape as the `rekey` statement below.
+            .pragma("key", format!(r#""x'{}'""#, hex_encode(&key)))
+            // SQLCipher v4 defaults otherwise (kdf_iter 256000, page 4096).
             .pragma("cipher_page_size", "4096")
-            .pragma("kdf_iter", "100_000")
             .pragma("journal_mode", "WAL")
             .pragma("foreign_keys", "ON")
             .pragma("busy_timeout", "5000");

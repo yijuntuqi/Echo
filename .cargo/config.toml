@@ -1,3 +1,11 @@
 [build]
 # E: is a removable drive; compile there and a dropout kills the build (os error 433).
 target-dir = "D:/cargo-target/echo"
+
+# SQLCipher 的 vendored OpenSSL 必须用完整的 Perl 构建（含 Locale::Maketext::Simple）。
+# Git Bash 自带的 MSYS perl 缺模块会直接失败，且在 Git Bash 的 PATH 里它始终排在
+# Windows PATH 前面，所以这里把 openssl-src 钉到 Strawberry Perl 的绝对路径。
+# 前置条件：安装 Strawberry Perl 到默认位置（C:\Strawberry）。
+# openssl-src 300 的查找顺序：OPENSSL_SRC_PERL > PERL > PATH 上的 perl。
+[env]
+OPENSSL_SRC_PERL = "C:/Strawberry/perl/bin/perl.exe"
