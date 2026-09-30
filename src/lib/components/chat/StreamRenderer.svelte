@@ -1,41 +1,53 @@
-<!-- StreamRenderer - Streaming markdown renderer -->
 <script lang="ts">
-    import { marked } from 'marked';
-    import { markedHighlight } from 'marked-highlight';
-    import hljs from 'highlight.js';
-    import 'highlight.js/styles/github-dark.min.css';
-    
-    export let content: string = '';
-    export let isStreaming: boolean = false;
-    
-    marked.use(markedHighlight({
-        langPrefix: 'hljs language-',
-        highlight(code, lang) {
-            if (hljs.getLanguage(lang)) return hljs.highlight(code, { language: lang }).value;
-            return code;
-        }
-    }));
-    
-    let renderedHtml = $derived.by(() => {
-        if (isStreaming) {
-            return content
-                .replace(/&/g, '&')
-                .replace(/</g, '<')
-                .replace(/>/g, '>')
-                .replace(/\n/g, '<br>');
-        }
-        return marked.parse(content, { async: false }) as string;
-    });
+  import { marked } from 'marked';
+  import { markedHighlight } from 'marked-highlight';
+  import hljs from 'highlight.js';
+  import 'highlight.js/styles/github-dark.css';
+
+  let { content = '', isStreaming = false } = $props<{ content: string; isStreaming?: boolean }>();
+
+  marked.use(
+    markedHighlight({
+      langPrefix: 'hljs language-',
+      highlight(code, lang) {
+        return hljs.getLanguage(lang) ? hljs.highlight(code, { language: lang }).value : code;
+      },
+    }),
+  );
+
+  // While streaming, escape and keep line breaks only: full Markdown parsing of a
+  // half-received string flickers (unclosed code fences, half-written tables).
+  const html = $derived.by(() => {
+    if (isStreaming) {
+      return content
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/\n/g, '<br>');
+    }
+    return marked.parse(content, { async: false }) as string;
+  });
 </script>
 
-<div class="message-content" innerHTML={renderedHtml} />
+<div class="md">{@html html}</div>
 
 <style>
-    .message-content :global(pre) { background: #1e1e1e; padding: 12px; border-radius: 8px; overflow: auto; margin: 8px 0; }
-    .message-content :global(code) { font-family: var(--font-mono); font-size: 0.9em; }
-    .message-content :global(pre code) { background: none; padding: 0; color: inherit; }
-    .message-content :global(blockquote) { border-left: 3px solid var(--color-accent); padding-left: 12px; color: var(--color-text-muted); margin: 8px 0; }
-    .message-content :global(a) { color: var(--color-accent); text-decoration: underline; }
-    .message-content :global(ul, ol) { padding-left: 20px; margin: 8px 0; }
-    .message-content :global(li) { margin: 4px 0; }
+  .md { font-size: 14px; }
+  .md :global(p) { margin: 0 0 8px; }
+  .md :global(p:last-child) { margin-bottom: 0; }
+  .md :global(pre) {
+    background: #1e1e1e; color: #e6edf3;
+    padding: 10px 12px; border-radius: var(--radius-sm);
+    overflow-x: auto; margin: 8px 0; font-size: 12.5px;
+  }
+  .md :global(code) { font-family: var(--font-mono); font-size: 0.9em; }
+  .md :global(:not(pre) > code) {
+    background: rgba(127, 127, 127, 0.18); padding: 1px 5px; border-radius: 4px;
+  }
+  .md :global(blockquote) {
+    border-left: 3px solid var(--color-accent);
+    padding-left: 10px; margin: 8px 0; opacity: 0.85;
+  }
+  .md :global(ul), .md :global(ol) { padding-left: 20px; margin: 8px 0; }
+  .md :global(li) { margin: 3px 0; }
 </style>

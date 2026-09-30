@@ -1,5 +1,5 @@
-// Pet Store - Core pet state management
-import { browser } from '$app/environment';
+﻿// Pet Store - Core pet state management
+import { isBrowser as browser } from '$lib/utils/env';
 
 export type Stage = 'egg' | 'child' | 'teen' | 'adult' | 'ultimate';
 export type PetAnimationState = 'idle' | 'walk' | 'sleep' | 'talk' | 'react' | 'evolve';

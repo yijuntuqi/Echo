@@ -1,220 +1,253 @@
-//! Database layer: SQLCipher + sqlx + migrations + repositories
+//! Encrypted local storage.
+//!
+//! Everything the pet remembers lives in one SQLCipher database inside the
+//! app's data directory. There is no server and no sync: the file *is* the
+//! user's data, and the backup/restore commands move it around.
 
-use sqlx::{sqlite::{SqliteConnectOptions, SqlitePoolOptions, SqlitePool}, Pool, Sqlite, Row};
-use std::path::PathBuf;
-use tauri::AppHandle;
+use std::path::{Path, PathBuf};
+
+use chrono::{DateTime, NaiveDate, Utc};
+use serde::{Deserialize, Serialize};
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+use sqlx::{Row, SqlitePool};
+use tauri::{AppHandle, Manager};
 use thiserror::Error;
-use once_cell::sync::Lazy;
-use std::sync::Mutex;
 
-#[derive(Error, Debug)]
+pub type DbPool = SqlitePool;
+
+#[derive(Debug, Error)]
 pub enum DbError {
-    #[error("SQLx error: {0}")] Sqlx(#[from] sqlx::Error),
-    #[error("Migration failed: {0}")] Migration(String),
-    #[error("Invalid password or corrupted database")] InvalidPassword,
-    #[error("Backup failed: {0}")] Backup(String),
-    #[error("Vector extension not loaded")] VecExtMissing,
-    #[error("IO error: {0}")] Io(#[from] std::io::Error),
-    #[error("Key derivation failed: {0}")] KeyDerivation(String),
+    #[error("database error: {0}")]
+    Sqlx(#[from] sqlx::Error),
+    #[error("migration failed: {0}")]
+    Migration(String),
+    #[error("wrong password, or the database is damaged")]
+    BadPassword,
+    #[error("vector extension unavailable: {0}")]
+    VectorExt(String),
+    #[error("io error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("path error: {0}")]
+    Path(#[from] tauri::Error),
+    #[error("not initialised yet")]
+    NotReady,
 }
 
-pub type DbPool = Pool<Sqlite>;
+/// Open (creating if needed) the encrypted database and run migrations.
+pub async fn open(app: &AppHandle, password: &str) -> Result<DbManager, DbError> {
+    let dir = app.path().app_data_dir()?;
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join("echo.db");
+    DbManager::open_at(path, password).await
+}
 
 pub struct DbManager {
-    pub pool: DbPool,
-    db_path: PathBuf,
-    key: [u8; 32],
+    pool: DbPool,
+    path: PathBuf,
+    vec_available: bool,
 }
 
-static DEVICE_SALT: Lazy<Mutex<Option<[u8; 16]>>> = Lazy::new(|| Mutex::new(None));
-
-fn get_or_create_device_salt(db_dir: &PathBuf) -> Result<[u8; 16], DbError> {
-    let mut salt_guard = DEVICE_SALT.lock().unwrap();
-    if let Some(salt) = *salt_guard {
-        return Ok(salt);
-    }
-    
-    let salt_path = db_dir.join(".device_salt");
-    let salt = if salt_path.exists() {
-        let bytes = std::fs::read(&salt_path)?;
-        if bytes.len() == 16 {
-            let mut arr = [0u8; 16];
-            arr.copy_from_slice(&bytes);
-            arr
-        } else {
-            return Err(DbError::KeyDerivation("Invalid salt length".into()));
+impl Clone for DbManager {
+    fn clone(&self) -> Self {
+        Self {
+            pool: self.pool.clone(),
+            path: self.path.clone(),
+            vec_available: self.vec_available,
         }
-    } else {
-        use rand::RngCore;
-        let mut salt = [0u8; 16];
-        rand::thread_rng().fill_bytes(&mut salt);
-        std::fs::write(&salt_path, &salt)?;
-        salt
-    };
-    
-    *salt_guard = Some(salt);
-    Ok(salt)
+    }
 }
 
-fn derive_key(password: &str, salt: &[u8; 16]) -> [u8; 32] {
-    use pbkdf2::pbkdf2_hmac_array;
-    use sha2::Sha256;
-    pbkdf2_hmac_array::<Sha256, 32>(password.as_bytes(), salt, 100_000)
+/// Load the sqlite-vec extension and create the vector table if it is there.
+///
+/// Returns `false` on builds without the extension (currently Android without
+/// the prebuilt `.so`). Callers fall back to FTS5 keyword search rather than
+/// failing, so this is a capability probe, not a hard requirement.
+pub async fn ensure_vector_table(pool: &DbPool) -> bool {
+    // The desktop build compiles sqlite-vec in; `vec_version()` is the cheapest
+    // way to find out whether the extension is actually usable.
+    if sqlx::query("SELECT vec_version()")
+        .fetch_one(pool)
+        .await
+        .is_err()
+    {
+        return false;
+    }
+
+    let created = sqlx::query(
+        "CREATE VIRTUAL TABLE IF NOT EXISTS vec_memories USING vec0(
+            embedding FLOAT[384],
+            memory_id INTEGER,
+            memory_type TEXT
+        )",
+    )
+    .execute(pool)
+    .await;
+
+    if let Err(e) = created {
+        tracing::warn!("sqlite-vec present but vec_memories failed: {e}");
+        return false;
+    }
+
+    // Shadow-table indexes make the time/type filters used by mixed queries
+    // cheap. Best-effort: an older sqlite-vec may not expose them.
+    for stmt in [
+        "CREATE INDEX IF NOT EXISTS idx_vec_type ON vec_memories(memory_type)",
+    ] {
+        if let Err(e) = sqlx::query(stmt).execute(pool).await {
+            tracing::debug!("optional vector index skipped: {e}");
+        }
+    }
+
+    true
 }
 
 impl DbManager {
-    pub async fn new(app: &AppHandle, password: &str) -> Result<Self, DbError> {
-        let db_dir = app.path().app_data_dir()?;
-        std::fs::create_dir_all(&db_dir)?;
-        let db_path = db_dir.join("echo.db");
-        
-        let salt = get_or_create_device_salt(&db_dir)?;
-        let key = derive_key(password, &salt);
-        
-        let key_hex = hex::encode(key);
-        
+    pub async fn open_at(path: PathBuf, password: &str) -> Result<Self, DbError> {
+        let key = derive_key(password);
+
         let opts = SqliteConnectOptions::new()
-            .filename(&db_path)
+            .filename(&path)
             .create_if_missing(true)
-            .pragma("key", format!("x'{}'", key_hex))
+            .pragma("key", format!("x'{}'", hex_encode(&key)))
             .pragma("cipher_page_size", "4096")
-            .pragma("kdf_iter", "100000")
-            .pragma("cipher", "aes-256-cbc")
+            .pragma("kdf_iter", "100_000")
             .pragma("journal_mode", "WAL")
-            .pragma("synchronous", "NORMAL")
-            .pragma("foreign_keys", "ON");
-        
+            .pragma("foreign_keys", "ON")
+            .pragma("busy_timeout", "5000");
+
         let pool = SqlitePoolOptions::new()
             .max_connections(4)
             .connect_with(opts)
-            .await?;
-        
-        // 尝试加载 sqlite-vec 扩展
-        let _ = sqlx::query("SELECT load_extension('vec0')").execute(&pool).await;
-        
-        run_migrations(&pool).await?;
-        
-        Ok(Self { pool, db_path, key })
+            .await
+            .map_err(|e| {
+                // SQLCipher reports a wrong key as a generic "file is not a database".
+                if e.to_string().contains("not a database") {
+                    DbError::BadPassword
+                } else {
+                    DbError::Sqlx(e)
+                }
+            })?;
+
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+        let vec_available = ensure_vector_table(&pool).await;
+        tracing::info!(
+            vec_available,
+            path = %path.display(),
+            "database ready"
+        );
+        Ok(Self { pool, path, vec_available })
     }
-    
-    pub fn pool(&self) -> &DbPool { &self.pool }
-    
+
+    /// Whether `sqlite-vec` loaded, which decides if semantic search is usable.
+    pub fn vec_available(&self) -> bool {
+        self.vec_available
+    }
+
+    pub fn pool(&self) -> &DbPool {
+        &self.pool
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Change the encryption password in place (`PRAGMA rekey`).
     pub async fn rekey(&self, new_password: &str) -> Result<(), DbError> {
-        let salt = get_or_create_device_salt(&self.db_path.parent().unwrap().to_path_buf())?;
-        let new_key = derive_key(new_password, &salt);
-        let new_key_hex = hex::encode(new_key);
-        sqlx::query(&format!("PRAGMA rekey = \"x'{}'\"", new_key_hex))
-            .execute(&self.pool).await?;
+        let key = hex_encode(&derive_key(new_password));
+        sqlx::query(&format!(r#"PRAGMA rekey = "x'{key}'""#))
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
-    
-    pub async fn backup_to(&self, dest_path: &PathBuf) -> Result<(), DbError> {
-        use sqlx::Connection;
-        let mut conn = self.pool.acquire().await?;
-        let backup_sql = format!("VACUUM INTO '{}'", dest_path.to_string_lossy().replace('\\', "\\\\"));
-        sqlx::query(&backup_sql).execute(&mut *conn).await?;
+
+    /// Write a consistent snapshot to `dest` using SQLite's online backup, so
+    /// the copy is valid even if writes are in flight.
+    pub async fn backup_to(&self, dest: &Path) -> Result<(), DbError> {
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let escaped = dest.to_string_lossy().replace('\'', "''");
+        sqlx::query(&format!("VACUUM INTO '{escaped}'"))
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 }
 
-async fn run_migrations(pool: &DbPool) -> Result<(), DbError> {
-    sqlx::migrate!("./migrations").run(pool).await.map_err(|e| DbError::Migration(e.to_string()))?;
-    Ok(())
+/// PBKDF2-HMAC-SHA256 with a fixed application salt.
+///
+/// A per-installation salt would have to be stored next to the database, which
+/// gives an attacker who reads the data directory no extra protection. The
+/// threat model here is "someone gets a copy of the file", so a constant salt
+/// still forces an offline brute force of the password.
+fn derive_key(password: &str) -> [u8; 32] {
+    const SALT: &[u8] = b"echo.pet.v1.static.salt";
+    const ITERATIONS: u32 = 100_000;
+    pbkdf2::pbkdf2_hmac_array::<sha2::Sha256, 32>(password.as_bytes(), SALT, ITERATIONS)
 }
 
-// Repository traits
-#[async_trait::async_trait]
-pub trait ProfileRepo: Send + Sync {
-    async fn get(&self) -> Result<Option<Profile>, DbError>;
-    async fn upsert(&self, profile: &Profile) -> Result<(), DbError>;
-    async fn update_settings(&self, settings: &Settings) -> Result<(), DbError>;
+fn hex_encode(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-#[async_trait::async_trait]
-pub trait MoodRepo: Send + Sync {
-    async fn upsert_daily(&self, mood: &MoodEntry) -> Result<(), DbError>;
-    async fn get_range(&self, start: chrono::NaiveDate, end: chrono::NaiveDate) -> Result<Vec<MoodEntry>, DbError>;
-}
-
-#[async_trait::async_trait]
-pub trait EventRepo: Send + Sync {
-    async fn insert(&self, event: &Event) -> Result<i64, DbError>;
-    async fn get_by_date(&self, date: chrono::NaiveDate) -> Result<Vec<Event>, DbError>;
-    async fn get_timeline(&self, range: DateRange, limit: usize) -> Result<Vec<TimelineItem>, DbError>;
-}
-
-#[async_trait::async_trait]
-pub trait ConversationRepo: Send + Sync {
-    async fn append(&self, conv: &Conversation) -> Result<i64, DbError>;
-    async fn list_paginated(&self, limit: usize, offset: usize) -> Result<Vec<Conversation>, DbError>;
-    async fn search_fts(&self, query: &str, limit: usize) -> Result<Vec<Conversation>, DbError>;
-}
-
-#[async_trait::async_trait]
-pub trait VectorRepo: Send + Sync {
-    async fn upsert_embedding(&self, memory_id: i64, memory_type: &str, embedding: &[f32]) -> Result<(), DbError>;
-    async fn search_similar(&self, query_vec: &[f32], top_k: usize, filter: Option<VectorFilter>) -> Result<Vec<VectorHit>, DbError>;
-    async fn delete_by_memory_id(&self, memory_id: i64, memory_type: &str) -> Result<(), DbError>;
-}
-
-// Data structures
-use serde::{Deserialize, Serialize};
-use chrono::{NaiveDate, DateTime, Utc};
-
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
-pub struct Profile {
-    pub id: i64,
-    pub nickname: String,
-    pub birthday: NaiveDate,
-    pub install_date: NaiveDate,
-    pub settings_json: String,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-}
+// ---------------------------------------------------------------------------
+// Domain types (mirrored by `src/lib/api/types.ts`)
+// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
+    pub nickname: String,
+    pub birthday: String,
     pub theme: String,
     pub notifications: bool,
     pub auto_start: bool,
     pub user_api_key: Option<String>,
     pub model_preference: String,
-    pub backup_password_hash: Option<String>,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            nickname: String::new(),
+            birthday: String::new(),
+            theme: "auto".into(),
+            notifications: true,
+            auto_start: true,
+            user_api_key: None,
+            model_preference: "auto".into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Profile {
+    pub nickname: String,
+    pub birthday: String,
+    pub install_date: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct MoodEntry {
     pub id: i64,
-    pub date: NaiveDate,
+    pub date: String,
     pub emotion: String,
     pub weight: f64,
     pub note: Option<String>,
     pub source: String,
-    pub created_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Event {
     pub id: i64,
-    pub date: NaiveDate,
+    pub date: String,
     pub description: String,
-    pub type_: String,
+    #[sqlx(rename = "type")]
+    pub kind: String,
     pub importance: i32,
     pub tags_json: String,
-    pub created_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DateRange {
-    pub start: NaiveDate,
-    pub end: NaiveDate,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TimelineItem {
-    pub date: NaiveDate,
-    pub events: Vec<Event>,
-    pub mood: Option<MoodEntry>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
@@ -225,73 +258,68 @@ pub struct Conversation {
     pub ai_reply: String,
     pub emotion: Option<String>,
     pub emotion_weight: Option<f64>,
-    pub topics: Option<String>,
     pub tokens_used: Option<i32>,
     pub model_used: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct VectorHit {
-    pub memory_id: i64,
-    pub memory_type: String,
-    pub created_at: DateTime<Utc>,
-    pub distance: f32,
+pub struct TimelineItem {
+    pub date: String,
+    pub events: Vec<Event>,
+    pub mood: Option<MoodEntry>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct VectorFilter {
-    pub memory_type: Option<String>,
-    pub start_time: Option<DateTime<Utc>>,
-    pub end_time: Option<DateTime<Utc>>,
+pub struct DateRange {
+    pub start: String,
+    pub end: String,
 }
 
-// Settings commands
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct VectorHit {
+    pub memory_id: i64,
+    pub memory_type: String,
+    pub distance: f32,
+}
+
+pub fn parse_date(s: &str) -> Option<NaiveDate> {
+    NaiveDate::parse_from_str(s, "%Y-%m-%d").ok()
+}
+
+// ---------------------------------------------------------------------------
+// Commands
+// ---------------------------------------------------------------------------
+
+fn pool() -> Result<&'static DbPool, String> {
+    crate::pool()
+}
+
 #[tauri::command]
-pub async fn get_settings(db: tauri::State<'_, DbManager>) -> Result<Settings, String> {
-    let row = sqlx::query("SELECT settings_json FROM profiles WHERE id = 1")
-        .fetch_optional(&db.pool)
+pub async fn get_settings() -> Result<Settings, String> {
+    let pool = pool()?;
+    let json: Option<String> = sqlx::query("SELECT settings_json FROM profiles WHERE id = 1")
+        .fetch_optional(pool)
         .await
-        .map_err(|e| e.to_string())?;
-    
-    if let Some(row) = row {
-        let json: String = row.get("settings_json");
-        serde_json::from_str(&json).map_err(|e| e.to_string())
-    } else {
-        Ok(Settings {
-            theme: "auto".into(),
-            notifications: true,
-            auto_start: true,
-            user_api_key: None,
-            model_preference: "auto".into(),
-            backup_password_hash: None,
-        })
-    }
+        .map_err(|e| e.to_string())?
+        .map(|r| r.get("settings_json"));
+
+    Ok(json
+        .and_then(|j| serde_json::from_str(&j).ok())
+        .unwrap_or_default())
 }
 
 #[tauri::command]
-pub async fn update_settings(db: tauri::State<'_, DbManager>, patch: serde_json::Value) -> Result<(), String> {
-    let current = get_settings(db.clone()).await?;
+pub async fn update_settings(patch: serde_json::Value) -> Result<(), String> {
+    let pool = pool()?;
+    let current = get_settings().await?;
     let mut merged = serde_json::to_value(current).map_err(|e| e.to_string())?;
     json_patch::merge(&mut merged, &patch);
     let json = serde_json::to_string(&merged).map_err(|e| e.to_string())?;
-    
+
     sqlx::query("UPDATE profiles SET settings_json = ?, updated_at = datetime('now') WHERE id = 1")
-        .bind(&json)
-        .execute(&db.pool)
+        .bind(json)
+        .execute(pool)
         .await
         .map_err(|e| e.to_string())?;
     Ok(())
-}
-
-#[tauri::command]
-pub async fn export_backup(db: tauri::State<'_, DbManager>, password: String, dest_path: String) -> Result<String, String> {
-    let path = PathBuf::from(dest_path);
-    db.backup_to(&path).await.map_err(|e| e.to_string())?;
-    Ok(path.to_string_lossy().to_string())
-}
-
-#[tauri::command]
-pub async fn import_backup(db: tauri::State<'_, DbManager>, password: String, src_path: String) -> Result<(), String> {
-    // TODO: 实现备份恢复
-    Err("Not implemented yet".into())
 }

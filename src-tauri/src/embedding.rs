@@ -1,58 +1,89 @@
-//! Embedding service: Candle + bge-small-zh-v1.5
+//! Local text embeddings for semantic memory search.
+//!
+//! The model is downloaded on first run and cached in the app data directory.
+//! Until it lands, memory search falls back to keyword matching so the feature
+//! degrades rather than disappearing.
 
-use candle_core::{Device, Tensor, Result as CResult};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
 use thiserror::Error;
 
-#[derive(Error, Debug)]
+#[derive(Debug, Error)]
 pub enum EmbeddingError {
-    #[error("Model not found: {0}")] NotFound(String),
-    #[error("Download failed: {0}")] Download(String),
-    #[error("Tokenizer error: {0}")] Tokenizer(String),
-    #[error("Candle error: {0}")] Candle(#[from] candle_core::Error),
-    #[error("IO error: {0}")] Io(#[from] std::io::Error),
+    #[error("model not downloaded yet: {0}")]
+    NotDownloaded(String),
+    #[error("download failed: {0}")]
+    Download(String),
+    #[error("inference failed: {0}")]
+    Inference(String),
+    #[error("io error: {0}")]
+    Io(#[from] std::io::Error),
 }
 
+/// Dimensionality of `bge-small-zh-v1.5`, the model we ship with.
+pub const EMBEDDING_DIM: usize = 384;
+
+pub const MODEL_ID: &str = "BAAI/bge-small-zh-v1.5";
+/// Mirror first: the canonical host is slow or blocked on some networks.
+pub const MODEL_BASE_URL: &str = "https://hf-mirror.com";
+
 pub struct EmbeddingService {
-    // model: BertModel,
-    // tokenizer: Tokenizer,
-    device: Device,
+    dir: PathBuf,
 }
 
 impl EmbeddingService {
-    pub async fn new(model_dir: &Path, device: Device) -> Result<Self, EmbeddingError> {
-        Ok(Self { device })
+    pub fn new(dir: PathBuf) -> Self {
+        Self { dir }
     }
-    
-    pub fn encode(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, EmbeddingError> {
-        // TODO: 实现推理
-        Ok(texts.iter().map(|_| vec![0.0; 384]).collect())
-    }
-    
-    pub fn encode_one(&self, text: &str) -> Result<Vec<f32>, EmbeddingError> {
-        self.encode(&[text]).map(|v| v.into_iter().next().unwrap())
-    }
-}
 
-pub struct ModelManager {
-    models_dir: std::path::PathBuf,
-}
-
-impl ModelManager {
-    pub fn new(app: &tauri::AppHandle) -> Result<Self, EmbeddingError> {
-        let models_dir = app.path().app_data_dir()?.join("models");
-        std::fs::create_dir_all(&models_dir)?;
-        Ok(Self { models_dir })
+    pub fn is_ready(&self) -> bool {
+        self.dir.join("model.safetensors").exists()
     }
-    
-    pub async fn ensure_bge_small_zh(&self, _progress_tx: tokio::sync::mpsc::Sender<DownloadProgress>) -> Result<std::path::PathBuf, EmbeddingError> {
-        Ok(self.models_dir.join("bge-small-zh-v1.5"))
-    }
-}
 
-#[derive(Debug, Clone)]
-pub struct DownloadProgress {
-    pub filename: String,
-    pub downloaded: u64,
-    pub total: u64,
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
+    /// Download the model files if they are not already cached.
+    ///
+    /// Reports progress as `(filename, downloaded_bytes, total_bytes)` so the
+    /// UI can show a determinate bar.
+    pub async fn ensure_model(
+        &self,
+        progress: tokio::sync::mpsc::Sender<(String, u64, u64)>,
+    ) -> Result<(), EmbeddingError> {
+        if self.is_ready() {
+            return Ok(());
+        }
+        std::fs::create_dir_all(&self.dir)?;
+
+        for file in ["config.json", "tokenizer.json", "model.safetensors"] {
+            let url = format!("{MODEL_BASE_URL}/{MODEL_ID}/resolve/main/{file}");
+            let dest = self.dir.join(file);
+            let bytes = reqwest::get(&url)
+                .await
+                .map_err(|e| EmbeddingError::Download(format!("{file}: {e}")))?
+                .bytes()
+                .await
+                .map_err(|e| EmbeddingError::Download(format!("{file}: {e}")))?;
+
+            // Write to a temp name so an interrupted download never leaves a
+            // truncated file that later looks "ready".
+            let tmp = dest.with_extension("part");
+            std::fs::write(&tmp, &bytes)?;
+            std::fs::rename(&tmp, &dest)?;
+
+            let _ = progress.send((file.to_string(), bytes.len() as u64, bytes.len() as u64)).await;
+        }
+        Ok(())
+    }
+
+    /// Encode one string. Implemented in the Candle task; until then this
+    /// reports why it cannot run rather than returning a zero vector, which
+    /// would silently poison every similarity search.
+    pub fn encode(&self, _text: &str) -> Result<Vec<f32>, EmbeddingError> {
+        Err(EmbeddingError::Inference(
+            "embedding inference is not wired up yet".into(),
+        ))
+    }
 }

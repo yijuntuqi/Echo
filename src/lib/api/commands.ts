@@ -1,60 +1,63 @@
-// Tauri IPC Commands - Type-safe invoke wrappers
+// Typed wrappers over Tauri IPC commands (`#[tauri::command]` on the Rust side).
+// Every call here maps 1:1 to a command registered in `src-tauri/src/main.rs`.
 import { invoke } from '@tauri-apps/api/core';
-import type { Conversation, MoodEntry, Event, VectorHit, EvolutionEvent, Settings, Stage } from './types';
+import type {
+  EvolutionStage,
+  Event,
+  EvolutionState,
+  Profile,
+  Settings,
+  SystemInfo,
+  TimelineItem,
+  UpdateInfo,
+  VectorHit,
+  DateRange,
+} from './types';
 
-// Window / Pet Overlay
-export const showPetOverlay = () => invoke<void>('show_pet_overlay');
-export const hidePetOverlay = () => invoke<void>('hide_pet_overlay');
-export const setClickThrough = (enabled: boolean) => invoke<void>('set_click_through', { enabled });
-export const getPetPosition = () => invoke<{ x: number; y: number } | null>('get_pet_position');
-export const setPetPosition = (x: number, y: number) => invoke<void>('set_pet_position', { x, y });
+// --- windows / pet overlay -------------------------------------------------
+export const showPetOverlay = (): Promise<void> => invoke('show_pet_overlay');
+export const hidePetOverlay = (): Promise<void> => invoke('hide_pet_overlay');
+/** `enabled = true` lets mouse clicks pass through the pet to whatever is beneath. */
+export const setClickThrough = (enabled: boolean): Promise<void> =>
+  invoke('set_click_through', { enabled });
+export const getPetPosition = (): Promise<{ x: number; y: number } | null> =>
+  invoke('get_pet_position');
+export const setPetPosition = (x: number, y: number): Promise<void> =>
+  invoke('set_pet_position', { x, y });
+/** Surface the main window and ask it to open the chat panel. */
+export const openChat = (): Promise<void> => invoke('open_chat');
 
-// Chat
-export const sendMessage = (message: string) => 
-    invoke<ReadableStream<ChatChunk>>('send_message', { message });
+// --- chat ------------------------------------------------------------------
+/** Fire-and-forget: replies stream back over the `chat:stream` event. */
+export const sendMessage = (message: string): Promise<void> =>
+  invoke('send_message', { message });
+export const getHistory = (limit = 50, offset = 0) =>
+  invoke<unknown[]>('get_history', { limit, offset });
+export const getQuotaRemaining = (): Promise<number> => invoke('get_quota_remaining');
 
-export const getHistory = (limit: number, offset: number) => 
-    invoke<Conversation[]>('get_history', { limit, offset });
+// --- memory ----------------------------------------------------------------
+export const searchMemory = (query: string, topK = 8): Promise<VectorHit[]> =>
+  invoke('search_memory', { query, topK });
+export const addEvent = (event: Omit<Event, 'id'>): Promise<number> =>
+  invoke('add_event', { event });
+export const getTimeline = (range: DateRange, limit = 200): Promise<TimelineItem[]> =>
+  invoke('get_timeline', { range, limit });
 
-export const getQuotaRemaining = () => invoke<number>('get_quota_remaining');
+// --- evolution -------------------------------------------------------------
+export const getEvolutionState = (): Promise<EvolutionState> => invoke('get_evolution_state');
+export const forceEvolve = (stage: EvolutionStage): Promise<void> =>
+  invoke('force_evolve', { stage });
 
-// Memory / Search
-export const searchMemory = (query: string, topK: number) => 
-    invoke<VectorHit[]>('search_memory', { query, top_k: topK });
+// --- settings / backup -----------------------------------------------------
+export const getSettings = (): Promise<Settings> => invoke('get_settings');
+export const updateSettings = (patch: Partial<Settings>): Promise<void> =>
+  invoke('update_settings', { patch });
 
-export const addEvent = (event: Omit<Event, 'id'>) => 
-    invoke<number>('add_event', { event });
+// --- system ----------------------------------------------------------------
+export const checkUpdates = (): Promise<UpdateInfo> => invoke('check_updates');
+export const getSystemInfo = (): Promise<SystemInfo> => invoke('get_system_info');
 
-export const getTimeline = (range: { start: string; end: string }, limit: number) => 
-    invoke<Event[]>('get_timeline', { range, limit });
-
-// Evolution
-export const getEvolutionState = () => invoke<{
-    stage: Stage;
-    personality: number[];
-    history: EvolutionEvent[];
-    progress: number;
-}>('get_evolution_state');
-
-export const forceEvolve = (stage: Stage) => invoke<void>('force_evolve', { stage });
-
-// Settings / Backup
-export const getSettings = () => invoke<Settings>('get_settings');
-export const updateSettings = (patch: Partial<Settings>) => invoke<void>('update_settings', { patch });
-export const exportBackup = (password: string, destPath: string) => invoke<string>('export_backup', { password, dest_path: destPath });
-export const importBackup = (password: string, srcPath: string) => invoke<void>('import_backup', { password, src_path: srcPath });
-
-// System
-export const checkUpdates = () => invoke<{ available: boolean; version: string; notes: string }>('check_updates');
-export const getSystemInfo = () => invoke<{ os: string; arch: string; version: string }>('get_system_info');
-
-// Onboarding
-export const completeOnboarding = (profile: any, settings: Settings) => invoke<void>('complete_onboarding', { profile, settings });
-export const getOnboardingStatus = () => invoke<boolean>('get_onboarding_status');
-
-// ChatChunk type for streaming
-export interface ChatChunk {
-    id: string;
-    choices: Array<{ index: number; delta: { content?: string; role?: string }; finish_reason?: string }>;
-    usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number };
-}
+// --- onboarding ------------------------------------------------------------
+export const completeOnboarding = (profile: Profile, settings: Settings): Promise<void> =>
+  invoke('complete_onboarding', { profile, settings });
+export const getOnboardingStatus = (): Promise<boolean> => invoke('get_onboarding_status');

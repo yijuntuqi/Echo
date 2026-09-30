@@ -1,113 +1,152 @@
-<!-- PetAvatar - SVG state machine animation -->
+<!-- PetAvatar: SVG state machine + drag + click for the pet window -->
 <script lang="ts">
-    import { petStore } from '$lib/stores/pet';
-    import { onMount, createEventDispatcher } from 'svelte';
-    import { motion, spring } from 'svelte-motion';
-    import type { PetAnimationState, Vec2 } from '$lib/api/types';
-    
-    export let position = $bindable($petStore.position);
-    
-    const dispatch = createEventDispatcher<{ openChat: void; contextMenu: { x: number; y: number } }>();
-    
-    const variants = {
-        idle: { opacity: 1, scale: 1, rotate: 0 },
-        walk: { x: [0, -5, 5, -5, 0], transition: { duration: 2, repeat: Infinity } },
-        sleep: { y: [0, -3, 0], opacity: [1, 0.7, 1], transition: { duration: 3, repeat: Infinity } },
-        talk: { scale: [1, 1.05, 1], y: [0, -2, 0], transition: { duration: 0.3, repeat: Infinity } },
-        react: { scale: [1, 1.2, 1], rotate: [0, -10, 10, 0], transition: { duration: 0.5 } },
-        evolve: { scale: [1, 0, 1.5, 1], rotate: [0, 360], opacity: [1, 0, 1], transition: { duration: 1.5, ease: 'easeOut' } },
-    };
-    
-    let currentSvg = $derived(petStore.svgPaths[petStore.animation] ?? petStore.svgPaths.idle);
-    let svgContent = $state<string>('');
-    const svgCache = new Map<string, string>();
-    
-    async function preloadSvgs() {
-        for (const path of Object.values(petStore.svgPaths)) {
-            try {
-                const res = await fetch(path);
-                if (res.ok) svgCache.set(path, await res.text());
-            } catch {}
-        }
+  import { createEventDispatcher } from 'svelte';
+  import { getCurrentWindow, PhysicalPosition } from '@tauri-apps/api/window';
+  import { openChat } from '$lib/api/commands';
+  import { petStore } from '$lib/stores/pet';
+
+  const dispatch = createEventDispatcher<{
+    openChat: void;
+    contextMenu: { x: number; y: number };
+  }>();
+
+  // Per-stage inline SVG art. Replaced by real asset files once they exist.
+  const STAGE_ART: Record<string, { body: string; accent: string }> = {
+    egg:     { body: '#fff8dc', accent: '#e8d9a0' },
+    child:   { body: '#ffe4b5', accent: '#e6b980' },
+    teen:    { body: '#ffd700', accent: '#d4a900' },
+    adult:   { body: '#ff8c00', accent: '#d16f00' },
+    ultimate:{ body: '#ff4500', accent: '#c23600' },
+  };
+
+  let svgMarkup = $derived.by(() => {
+    const art = STAGE_ART[petStore.stage] ?? STAGE_ART.egg;
+    const eyes = petStore.animation === 'sleep'
+      ? `<path d="M78 96 q6 6 12 0 M110 96 q6 6 12 0" stroke="#333" stroke-width="3" fill="none" stroke-linecap="round"/>`
+      : `<circle cx="84" cy="96" r="5" fill="#333"/><circle cx="116" cy="96" r="5" fill="#333"/>`;
+    return `<svg viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg">
+      <ellipse cx="100" cy="168" rx="46" ry="8" fill="rgba(0,0,0,0.10)"/>
+      <path d="M100 24 C134 24 156 56 156 96 C156 132 132 154 100 154 C68 154 44 132 44 96 C44 56 66 24 100 24 Z"
+            fill="${art.body}" stroke="${art.accent}" stroke-width="3"/>
+      ${eyes}
+      <path d="M88 118 q12 10 24 0" stroke="#333" stroke-width="3" fill="none" stroke-linecap="round"/>
+    </svg>`;
+  });
+
+  // Animation is CSS-driven off the store's animation state.
+  let animClass = $derived(`anim-${petStore.animation}`);
+
+  let dragging = $state(false);
+  let dragOrigin = { x: 0, y: 0 };
+
+  function startDrag(e: MouseEvent) {
+    if (petStore.clickThrough) return;
+    dragging = true;
+    dragOrigin = { x: e.screenX, y: e.screenY };
+    petStore.playAnimation('walk');
+  }
+
+  async function onDrag(e: MouseEvent) {
+    if (!dragging) return;
+    const dx = e.screenX - dragOrigin.x;
+    const dy = e.screenY - dragOrigin.y;
+    if (dx === 0 && dy === 0) return;
+    dragOrigin = { x: e.screenX, y: e.screenY };
+    try {
+      const win = getCurrentWindow();
+      const pos = await win.outerPosition();
+      await win.setPosition(new PhysicalPosition(pos.x + dx, pos.y + dy));
+    } catch {
+      // Not running inside Tauri (e.g. `vite dev` in a plain browser tab).
     }
-    
-    $effect(() => {
-        if (svgCache.has(currentSvg)) {
-            svgContent = svgCache.get(currentSvg)!;
-        } else {
-            svgContent = `<svg viewBox="0 0 200 200"><circle cx="100" cy="100" r="80" fill="#ffd700"/></svg>`;
-        }
-    });
-    
-    onMount(preloadSvgs);
-    
-    let dragStart = { x: 0, y: 0 };
-    function handleMouseDown(e: MouseEvent) {
-        if (petStore.clickThrough) return;
-        dragStart = { x: e.clientX - position.x, y: e.clientY - position.y };
-        window.addEventListener('mousemove', handleMouseMove);
-        window.addEventListener('mouseup', handleMouseUp);
-        petStore.playAnimation('walk');
-    }
-    function handleMouseMove(e: MouseEvent) {
-        const newPos = { x: e.clientX - dragStart.x, y: e.clientY - dragStart.y };
-        position = newPos;
-    }
-    function handleMouseUp() {
-        window.removeEventListener('mousemove', handleMouseMove);
-        window.removeEventListener('mouseup', handleMouseUp);
-        petStore.playAnimation('idle');
-    }
-    
-    function handleClick() {
-        petStore.playAnimation('react');
-        petStore.touch();
-        dispatch('openChat');
-    }
-    
-    function handleContextMenu(e: MouseEvent) {
-        e.preventDefault();
-        dispatch('contextMenu', { x: e.clientX, y: e.clientY });
-    }
+  }
+
+  function endDrag() {
+    if (!dragging) return;
+    dragging = false;
+    petStore.playAnimation('idle');
+  }
+
+  async function onClick() {
+    petStore.playAnimation('react');
+    petStore.touch();
+    // The chat panel lives in the main window; ask the backend to surface it.
+    openChat().catch(() => dispatch('openChat'));
+  }
+
+  function onContextMenu(e: MouseEvent) {
+    e.preventDefault();
+    dispatch('contextMenu', { x: e.screenX, y: e.screenY });
+  }
 </script>
 
-<div 
-    class="pet-avatar"
-    style:transform="translate({position.x}px, {position.y}px)"
-    on:mousedown={handleMouseDown}
-    on:click={handleClick}
-    on:contextmenu={handleContextMenu}
+<svelte:window
+  onmousedown={startDrag}
+  onmousemove={onDrag}
+  onmouseup={endDrag}
+  onmouseleave={endDrag}
+/>
+
+<div
+  class="pet-avatar {animClass}"
+  class:dragging
+  onclick={onClick}
+  oncontextmenu={onContextMenu}
+  onkeydown={(e) => e.key === 'Enter' && onClick()}
+  role="button"
+  tabindex="0"
+  aria-label="Echo 宠物"
 >
-    <motion.div
-        animate={variants[petStore.animation] || variants.idle}
-        transition={{ type: 'spring', stiffness: 300, damping: 30 }}
-    >
-        {@html svgContent}
-    </motion.div>
-    
-    {#if petStore.animation === 'evolve'}
-        <div class="evolve-ring" />
-    {/if}
+  {@html svgMarkup}
+
+  {#if petStore.animation === 'evolve'}
+    <span class="evolve-ring" aria-hidden="true"></span>
+  {/if}
 </div>
 
 <style>
-    .pet-avatar {
-        position: fixed;
-        pointer-events: auto;
-        z-index: 9999;
-        width: 160px;
-        height: 160px;
-        cursor: grab;
-        user-select: none;
-        -webkit-user-select: none;
-    }
-    .pet-avatar:active { cursor: grabbing; }
-    .evolve-ring {
-        position: absolute;
-        inset: -20px;
-        border: 3px solid #ffd700;
-        border-radius: 50%;
-        animation: pulse 1.5s ease-out forwards;
-    }
-    @keyframes pulse { from { opacity: 1; transform: scale(0.8); } to { opacity: 0; transform: scale(1.5); } }
+  .pet-avatar {
+    width: 100%;
+    height: 100%;
+    display: grid;
+    place-items: center;
+    cursor: grab;
+    user-select: none;
+    -webkit-user-select: none;
+    -webkit-app-region: no-drag;
+  }
+  .pet-avatar.dragging { cursor: grabbing; }
+  .pet-avatar :global(svg) { width: 100%; height: 100%; pointer-events: none; }
+
+  /* --- animation states --- */
+  .anim-idle   { animation: breathe 3.2s ease-in-out infinite; }
+  .anim-walk   { animation: waddle 0.6s ease-in-out infinite; }
+  .anim-sleep  { animation: breathe 4.5s ease-in-out infinite; filter: saturate(0.7); }
+  .anim-talk   { animation: chatter 0.28s ease-in-out infinite; }
+  .anim-react  { animation: pop 0.45s ease-out; }
+  .anim-evolve { animation: evolve 1.5s ease-out; }
+
+  @keyframes breathe { 0%,100% { transform: scale(1) } 50% { transform: scale(1.03) } }
+  @keyframes waddle  { 0%,100% { transform: rotate(-4deg) } 50% { transform: rotate(4deg) } }
+  @keyframes chatter { 0%,100% { transform: translateY(0) scale(1) } 50% { transform: translateY(-2px) scale(1.04) } }
+  @keyframes pop     { 0% { transform: scale(1) } 40% { transform: scale(1.18) } 100% { transform: scale(1) } }
+  @keyframes evolve  {
+    0%   { transform: scale(1) rotate(0); opacity: 1 }
+    30%  { transform: scale(0) rotate(180deg); opacity: 0 }
+    60%  { transform: scale(1.4) rotate(360deg); opacity: 1 }
+    100% { transform: scale(1) rotate(360deg); opacity: 1 }
+  }
+
+  .evolve-ring {
+    position: absolute;
+    inset: 8%;
+    border: 3px solid #ffd700;
+    border-radius: 50%;
+    animation: ring 1.5s ease-out forwards;
+    pointer-events: none;
+  }
+  @keyframes ring {
+    from { opacity: 1; transform: scale(0.75) }
+    to   { opacity: 0; transform: scale(1.4) }
+  }
 </style>

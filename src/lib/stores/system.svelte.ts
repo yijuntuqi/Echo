@@ -1,5 +1,5 @@
-// System Store - App-level state
-import { browser } from '$app/environment';
+﻿// System Store - App-level state
+import { isBrowser as browser } from '$lib/utils/env';
 
 function createSystemStore() {
     let isOnline = $state(true);

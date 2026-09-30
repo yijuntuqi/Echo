@@ -1,28 +1,37 @@
 {
   "compilerOptions": {
     "target": "ES2022",
-    "useDefineForClassFields": true,
     "module": "ESNext",
-    "lib": ["ES2022", "DOM", "DOM.Iterable"],
     "moduleResolution": "bundler",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "types": ["svelte", "vite/client", "node"],
+    "useDefineForClassFields": true,
     "resolveJsonModule": true,
     "isolatedModules": true,
+    "allowImportingTsExtensions": true,
     "noEmit": true,
+    "skipLibCheck": true,
+
     "strict": true,
     "noUnusedLocals": true,
     "noUnusedParameters": true,
+    "noImplicitOverride": true,
     "noFallthroughCasesInSwitch": true,
-    "allowImportingTsExtensions": true,
+
+    "verbatimModuleSyntax": true,
+
     "baseUrl": ".",
     "paths": {
+      "$lib": ["src/lib/index.ts"],
+      // Rune stores use the `.svelte.ts` extension, which TS does not probe on
+      // its own; this more specific pattern must be listed to win over `$lib/*`.
+      "$lib/stores/*": ["src/lib/stores/*.svelte.ts"],
       "$lib/*": ["src/lib/*"],
       "$api/*": ["src/lib/api/*"],
-      "$components/*": ["src/lib/components/*"],
-      "$stores/*": ["src/lib/stores/*"],
       "$styles/*": ["src/lib/styles/*"],
       "$utils/*": ["src/lib/utils/*"]
     }
   },
-  "include": ["src/**/*", "src-tauri/**/*.d.ts"],
-  "exclude": ["node_modules", "dist", "build"]
+  "include": ["src/**/*.ts", "src/**/*.svelte", "vite.config.ts", "tailwind.config.ts"],
+  "exclude": ["node_modules", "dist", "src-tauri"]
 }

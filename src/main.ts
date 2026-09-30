@@ -1,27 +1,9 @@
-// Echo - Main Entry Point
+// Main window entry (plain Svelte 5 + Vite, no SvelteKit)
 import './lib/styles/global.css';
-import { createApp } from './app';
+import { mount } from 'svelte';
+import App from './App.svelte';
 
-// Tauri 环境检测
-declare global {
-    interface Window {
-        __TAURI__?: any;
-    }
-}
+const target = document.getElementById('app');
+if (!target) throw new Error('#app mount target not found');
 
-async function bootstrap() {
-    const app = createApp();
-    app.mount('#app');
-    
-    // 如果在 Tauri 中，等待就绪
-    if (window.__TAURI__) {
-        try {
-            await window.__TAURI__.core.invoke('get_onboarding_status');
-            // 应用已初始化
-        } catch {
-            // 忽略错误
-        }
-    }
-}
-
-bootstrap().catch(console.error);
+export default mount(App, { target });

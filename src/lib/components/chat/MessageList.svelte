@@ -1,21 +1,26 @@
-<!-- MessageList - Virtual list of messages -->
 <script lang="ts">
-    import MessageBubble from './MessageBubble.svelte';
-    import type { Message } from '$lib/stores/chat';
-    
-    export let messages: Message[] = [];
+  import MessageBubble from './MessageBubble.svelte';
+
+  let { messages = [] } = $props();
 </script>
 
 <div class="message-list">
-    {#each messages as msg (msg.id)}
-        <MessageBubble message={msg} />
-    {/each}
-    {#if messages.length === 0}
-        <div class="empty-state">说点什么开始对话吧 💬</div>
-    {/if}
+  {#each messages as msg (msg.id)}
+    <MessageBubble message={msg} />
+  {:else}
+    <p class="empty">说点什么开始对话吧 💬</p>
+  {/each}
 </div>
 
 <style>
-    .message-list { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
-    .empty-state { text-align: center; color: var(--color-text-muted); padding: 40px; font-size: 14px; }
+  .message-list {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+  .empty { margin: auto; color: var(--color-text-muted); font-size: 14px; }
 </style>

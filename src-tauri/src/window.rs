@@ -1,25 +1,81 @@
-//! Window management: transparent pet overlay, system tray, global hotkey
+//! Window management: the transparent pet overlay, the system tray, and the
+//! global hotkey. The pet lives in its own always-on-top window; the main
+//! window hosts the dashboard and the chat panel.
 
-use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder, WebviewWindow};
-use tauri::tray::{TrayIconBuilder, TrayIconEvent};
-use tauri::menu::{MenuBuilder, MenuItemBuilder, PredefinedMenuItem};
-use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut};
 use std::sync::Mutex;
+
+use tauri::menu::{MenuBuilder, MenuItemBuilder, PredefinedMenuItem};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
+use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut};
 
 pub struct WindowManager {
     pub pet_window: Option<WebviewWindow>,
     pub tray: Option<tauri::tray::TrayIcon>,
-    pub click_through: Mutex<bool>,
+    click_through: Mutex<bool>,
 }
 
+/// Label of the always-on-top pet window, as declared in `tauri.conf.json`.
+const PET_WINDOW: &str = "pet";
+/// Label of the main window.
+const MAIN_WINDOW: &str = "main";
+
 impl WindowManager {
-    pub async fn init(app: &AppHandle) -> Result<Self, Box<dyn std::error::Error>> {
-        // 创建透明宠物窗口
-        let pet_window = WebviewWindowBuilder::new(
-            app,
-            "pet",
-            WebviewUrl::App("pet.html".into()),
-        )
+    pub fn init(app: &AppHandle) -> Result<Self, Box<dyn std::error::Error>> {
+        let pet_window = build_pet_window(app)?;
+        let tray = build_tray(app)?;
+        register_hotkey(app)?;
+
+        Ok(Self {
+            pet_window: Some(pet_window),
+            tray: Some(tray),
+            click_through: Mutex::new(true),
+        })
+    }
+
+    /// Toggle whether mouse input passes through the pet to whatever is beneath.
+    pub fn set_click_through(&self, enabled: bool) -> Result<(), String> {
+        #[cfg(target_os = "windows")]
+        if let Some(win) = &self.pet_window {
+            use windows::Win32::Foundation::HWND;
+            use windows::Win32::UI::WindowsAndMessaging::{
+                GetWindowLongPtrW, SetWindowLongPtrW, GWL_EXSTYLE, WS_EX_TRANSPARENT,
+            };
+            let Ok(hwnd) = win.hwnd() else {
+                return Err("failed to read pet window handle".into());
+            };
+            let hwnd = HWND(hwnd.0 as *mut core::ffi::c_void);
+            // SAFETY: called on the UI thread with a live HWND owned by this window.
+            unsafe {
+                let current = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+                let updated = if enabled {
+                    current | WS_EX_TRANSPARENT.0 as isize
+                } else {
+                    current & !(WS_EX_TRANSPARENT.0 as isize)
+                };
+                SetWindowLongPtrW(hwnd, GWL_EXSTYLE, updated);
+            }
+        }
+
+        *self
+            .click_through
+            .lock()
+            .map_err(|_| "click-through lock poisoned".to_string())? = enabled;
+        Ok(())
+    }
+
+    pub fn click_through(&self) -> bool {
+        self.click_through.lock().map(|v| *v).unwrap_or(true)
+    }
+}
+
+fn build_pet_window(app: &AppHandle) -> Result<WebviewWindow, Box<dyn std::error::Error>> {
+    // `tauri.conf.json` already declares this window; reuse it if it exists.
+    if let Some(existing) = app.get_webview_window(PET_WINDOW) {
+        return Ok(existing);
+    }
+
+    let win = WebviewWindowBuilder::new(app, PET_WINDOW, WebviewUrl::App("pet.html".into()))
         .title("Echo Pet")
         .inner_size(200.0, 200.0)
         .min_inner_size(160.0, 160.0)
@@ -29,151 +85,184 @@ impl WindowManager {
         .transparent(true)
         .always_on_top(true)
         .skip_taskbar(true)
+        .shadow(false)
         .visible(false)
         .build()?;
-        
-        // Windows: 设置点击穿透
-        #[cfg(target_os = "windows")]
-        {
-            use tauri::webview::WebviewExt;
-            let hwnd = pet_window.hwnd()?;
+
+    #[cfg(target_os = "windows")]
+    {
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            GetWindowLongPtrW, SetWindowLongPtrW, GWL_EXSTYLE, WS_EX_LAYERED, WS_EX_TOPMOST,
+            WS_EX_TRANSPARENT,
+        };
+        if let Ok(raw) = win.hwnd() {
+            let hwnd = HWND(raw.0 as *mut core::ffi::c_void);
+            // SAFETY: called on the UI thread with a live HWND owned by this window.
+            // WS_EX_LAYERED is required for per-pixel alpha on a transparent window.
             unsafe {
-                use windows::Win32::UI::WindowsAndMessaging::{
-                    SetWindowLongPtrW, GetWindowLongPtrW, GWL_EXSTYLE,
-                    WS_EX_LAYERED, WS_EX_TRANSPARENT, WS_EX_TOPMOST
-                };
-                let ex_style = GetWindowLongPtrW(hwnd as _, GWL_EXSTYLE);
+                let current = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
                 SetWindowLongPtrW(
-                    hwnd as _, 
-                    GWL_EXSTYLE, 
-                    ex_style | WS_EX_LAYERED as isize | WS_EX_TRANSPARENT as isize | WS_EX_TOPMOST as isize
+                    hwnd,
+                    GWL_EXSTYLE,
+                    current
+                        | WS_EX_LAYERED.0 as isize
+                        | WS_EX_TRANSPARENT.0 as isize
+                        | WS_EX_TOPMOST.0 as isize,
                 );
             }
         }
-        
-        // 创建系统托盘
-        let show_item = MenuItemBuilder::new("显示宠物").id("show").build(app)?;
-        let hide_item = MenuItemBuilder::new("隐藏宠物").id("hide").build(app)?;
-        let settings_item = MenuItemBuilder::new("设置").id("settings").build(app)?;
-        let quit_item = MenuItemBuilder::new("退出").id("quit").build(app)?;
-        let separator = PredefinedMenuItem::separator(app)?;
-        
-        let menu = MenuBuilder::new(app)
-            .items(&[&show_item, &hide_item, &separator, &settings_item, &separator, &quit_item])
-            .build()?;
-        
-        let tray = TrayIconBuilder::new()
-            .icon(app.default_window_icon()?.clone())
-            .menu(&menu)
-            .on_tray_icon_event(|tray, event| {
-                if let TrayIconEvent::Click { button: tauri::tray::MouseButton::Left, .. } = event {
-                    let app = tray.app_handle();
-                    if let Some(window) = app.get_webview_window("pet") {
-                        let _ = window.set_visible(!window.is_visible().unwrap_or(false));
-                    }
-                }
-            })
-            .build(app)?;
-        
-        // 注册全局热键 Ctrl+Alt+E
-        let shortcut = Shortcut::new(Some(tauri_plugin_global_shortcut::Modifiers::CONTROL | tauri_plugin_global_shortcut::Modifiers::ALT), tauri_plugin_global_shortcut::Key::KeyE);
-        app.global_shortcut().register(shortcut)?;
+    }
 
-        // 监听热键触发
-        let app_handle = app.clone();
-        app.listen_global("global-shortcut", move |_| {
-            if let Some(window) = app_handle.get_webview_window("pet") {
-                let _ = window.set_visible(!window.is_visible().unwrap_or(false));
+    Ok(win)
+}
+
+fn build_tray(app: &AppHandle) -> Result<tauri::tray::TrayIcon, Box<dyn std::error::Error>> {
+    let show = MenuItemBuilder::with_id("show", "显示宠物").build(app)?;
+    let hide = MenuItemBuilder::with_id("hide", "隐藏宠物").build(app)?;
+    let settings = MenuItemBuilder::with_id("settings", "设置").build(app)?;
+    let quit = MenuItemBuilder::with_id("quit", "退出").build(app)?;
+    let sep1 = PredefinedMenuItem::separator(app)?;
+    let sep2 = PredefinedMenuItem::separator(app)?;
+
+    let menu = MenuBuilder::new(app)
+        .items(&[&show, &hide, &sep1, &settings, &sep2, &quit])
+        .build()?;
+
+    let icon = app
+        .default_window_icon()
+        .cloned()
+        .ok_or("missing default window icon")?;
+
+    let tray = TrayIconBuilder::with_id("main-tray")
+        .icon(icon)
+        .tooltip("Echo")
+        .menu(&menu)
+        .show_menu_on_left_click(false)
+        .on_menu_event(handle_menu_event)
+        .on_tray_icon_event(|tray, event| {
+            // Left click toggles the pet; the menu is reserved for right click.
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                let app = tray.app_handle();
+                toggle_pet_window(app);
             }
-        });
-        
-        // 处理菜单事件
-        let app_handle = app.clone();
-        app.on_menu_event(move |app, event| {
-            match event.id().as_ref() {
-                "show" => {
-                    if let Some(w) = app.get_webview_window("pet") { let _ = w.show(); }
-                }
-                "hide" => {
-                    if let Some(w) = app.get_webview_window("pet") { let _ = w.hide(); }
-                }
-                "settings" => {
-                    if let Some(w) = app.get_webview_window("main") { 
-                        let _ = w.show(); 
-                        let _ = w.set_focus(); 
-                    }
-                }
-                "quit" => {
-                    app.exit(0);
-                }
-                _ => {}
-            }
-        });
-        
-        Ok(Self {
-            pet_window: Some(pet_window),
-            tray: Some(tray),
-            click_through: Mutex::new(true),
         })
+        .build(app)?;
+
+    Ok(tray)
+}
+
+fn handle_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
+    match event.id().as_ref() {
+        "show" => show_pet_window(app),
+        "hide" => hide_pet_window(app),
+        "settings" => show_main_window(app),
+        // "quit" is distinct from "hide": it tears the process down.
+        "quit" => app.exit(0),
+        _ => {}
     }
 }
 
-#[tauri::command]
-pub async fn show_pet_overlay(window_mgr: tauri::State<'_, WindowManager>) -> Result<(), String> {
-    if let Some(w) = &window_mgr.pet_window {
-        w.show().map_err(|e| e.to_string())?;
-    }
+fn register_hotkey(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
+    let shortcut = Shortcut::new(Some(Modifiers::CONTROL | Modifiers::ALT), Code::KeyE);
+    app.global_shortcut()
+        .on_shortcut(shortcut, |app, _sc, _event| {
+            toggle_pet_window(app);
+        })
+        .map_err(|e| format!("could not register Ctrl+Alt+E: {e}"))?;
     Ok(())
 }
 
-#[tauri::command]
-pub async fn hide_pet_overlay(window_mgr: tauri::State<'_, WindowManager>) -> Result<(), String> {
-    if let Some(w) = &window_mgr.pet_window {
-        w.hide().map_err(|e| e.to_string())?;
-    }
-    Ok(())
-}
-
-#[tauri::command]
-pub async fn set_click_through(window_mgr: tauri::State<'_, WindowManager>, enabled: bool) -> Result<(), String> {
-    #[cfg(target_os = "windows")]
-    {
-        if let Some(w) = &window_mgr.pet_window {
-            let hwnd = w.hwnd().map_err(|e| e.to_string())?;
-            unsafe {
-                use windows::Win32::UI::WindowsAndMessaging::{
-                    SetWindowLongPtrW, GetWindowLongPtrW, GWL_EXSTYLE,
-                    WS_EX_LAYERED, WS_EX_TRANSPARENT
-                };
-                let ex_style = GetWindowLongPtrW(hwnd as _, GWL_EXSTYLE);
-                let new_style = if enabled {
-                    ex_style | WS_EX_TRANSPARENT as isize
-                } else {
-                    ex_style & !(WS_EX_TRANSPARENT as isize)
-                };
-                SetWindowLongPtrW(hwnd as _, GWL_EXSTYLE, new_style);
-            }
+fn toggle_pet_window(app: &AppHandle) {
+    let Some(win) = app.get_webview_window(PET_WINDOW) else {
+        return;
+    };
+    match win.is_visible() {
+        Ok(true) => {
+            let _ = win.hide();
+        }
+        _ => {
+            let _ = win.show();
+            let _ = win.set_always_on_top(true);
         }
     }
-    *window_mgr.click_through.lock().unwrap() = enabled;
+}
+
+fn show_pet_window(app: &AppHandle) {
+    if let Some(win) = app.get_webview_window(PET_WINDOW) {
+        let _ = win.show();
+        let _ = win.set_always_on_top(true);
+    }
+}
+
+fn hide_pet_window(app: &AppHandle) {
+    if let Some(win) = app.get_webview_window(PET_WINDOW) {
+        let _ = win.hide();
+    }
+}
+
+pub fn show_main_window(app: &AppHandle) {
+    if let Some(win) = app.get_webview_window(MAIN_WINDOW) {
+        let _ = win.show();
+        let _ = win.unminimize();
+        let _ = win.set_focus();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tauri commands
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub fn show_pet_overlay(app: AppHandle) -> Result<(), String> {
+    show_pet_window(&app);
     Ok(())
 }
 
 #[tauri::command]
-pub async fn get_pet_position(window_mgr: tauri::State<'_, WindowManager>) -> Result<Option<(f64, f64)>, String> {
-    if let Some(w) = &window_mgr.pet_window {
-        let pos = w.outer_position().map_err(|e| e.to_string())?;
-        Ok(Some((pos.x as f64, pos.y as f64)))
-    } else {
-        Ok(None)
-    }
+pub fn hide_pet_overlay(app: AppHandle) -> Result<(), String> {
+    hide_pet_window(&app);
+    Ok(())
 }
 
 #[tauri::command]
-pub async fn set_pet_position(window_mgr: tauri::State<'_, WindowManager>, x: f64, y: f64) -> Result<(), String> {
-    if let Some(w) = &window_mgr.pet_window {
-        w.set_position(tauri::Position::Physical(tauri::PhysicalPosition { x: x as i32, y: y as i32 }))
-            .map_err(|e| e.to_string())?;
-    }
-    Ok(())
+pub fn set_click_through(
+    manager: tauri::State<'_, WindowManager>,
+    enabled: bool,
+) -> Result<(), String> {
+    manager.set_click_through(enabled)
+}
+
+#[tauri::command]
+pub fn get_click_through(manager: tauri::State<'_, WindowManager>) -> bool {
+    manager.click_through()
+}
+
+#[tauri::command]
+pub fn get_pet_position(app: AppHandle) -> Option<(f64, f64)> {
+    let win = app.get_webview_window(PET_WINDOW)?;
+    let pos = win.outer_position().ok()?;
+    Some((pos.x as f64, pos.y as f64))
+}
+
+#[tauri::command]
+pub fn set_pet_position(app: AppHandle, x: f64, y: f64) -> Result<(), String> {
+    let win = app
+        .get_webview_window(PET_WINDOW)
+        .ok_or_else(|| "pet window not found".to_string())?;
+    win.set_position(PhysicalPosition::new(x as i32, y as i32))
+        .map_err(|e| e.to_string())
+}
+
+/// Surface the main window and tell its frontend to open the chat panel.
+#[tauri::command]
+pub fn open_chat(app: AppHandle) -> Result<(), String> {
+    show_main_window(&app);
+    app.emit("chat:open", ())
+        .map_err(|e| e.to_string())
 }

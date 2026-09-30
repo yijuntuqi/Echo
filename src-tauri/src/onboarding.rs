@@ -1,52 +1,154 @@
-//! Onboarding wizard: first-run setup
+//! First-run setup.
+//!
+//! Onboarding collects a nickname and birthday, picks a database password, and
+//! writes the initial profile. Everything after this point assumes the database
+//! is open, so the main window stays hidden until it finishes.
 
-use crate::db::{DbManager, Profile, Settings};
-use chrono::NaiveDate;
+use serde::Deserialize;
 use tauri::AppHandle;
 
-pub struct OnboardingManager {
-    db: DbManager,
+use crate::db::{DbManager, Profile, Settings};
+
+/// How the database password is kept. The user never types it: onboarding
+/// generates a random one and hands it to the OS credential vault, so the
+/// database is encrypted at rest without adding a prompt anyone has to remember.
+const KEYCHAIN_SERVICE: &str = "com.yijuntuqi.echo";
+const KEYCHAIN_USER: &str = "echo.db-password";
+
+#[derive(Debug, Deserialize)]
+pub struct OnboardingRequest {
+    pub profile: Profile,
+    pub settings: Settings,
 }
 
-impl OnboardingManager {
-    pub fn new(db: DbManager) -> Self { Self { db } }
-    
-    pub async fn complete(&self, profile: Profile, settings: Settings) -> Result<(), String> {
-        sqlx::query(
-            "INSERT INTO profiles (id, nickname, birthday, install_date, settings_json) VALUES (1, ?, ?, ?, ?)
-             ON CONFLICT(id) DO UPDATE SET nickname=?, birthday=?, settings_json=?, updated_at=datetime('now')"
-        )
-        .bind(&profile.nickname)
-        .bind(&profile.birthday)
-        .bind(&profile.install_date)
-        .bind(&profile.settings_json)
-        .bind(&profile.nickname)
-        .bind(&profile.birthday)
-        .bind(&profile.settings_json)
-        .execute(&self.db.pool)
+async fn profile_exists() -> Result<bool, String> {
+    let Some(pool) = crate::state().db.get() else {
+        // No database yet means a first run, which is exactly "not onboarded".
+        return Ok(false);
+    };
+    sqlx::query("SELECT 1 FROM profiles WHERE id = 1")
+        .fetch_optional(pool)
         .await
-        .map_err(|e| e.to_string())?;
-        Ok(())
-    }
-    
-    pub async fn is_completed(&self) -> Result<bool, String> {
-        let row = sqlx::query("SELECT 1 FROM profiles WHERE id = 1")
-            .fetch_optional(&self.db.pool)
-            .await
-            .map_err(|e| e.to_string())?;
-        Ok(row.is_some())
-    }
-}
-
-#[tauri::command]
-pub async fn complete_onboarding(
-    profile: crate::db::Profile,
-    settings: crate::db::Settings,
-) -> Result<(), String> {
-    Ok(())
+        .map(|row| row.is_some())
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub async fn get_onboarding_status() -> Result<bool, String> {
-    Ok(false)
+    profile_exists().await
+}
+
+#[tauri::command]
+pub async fn complete_onboarding(
+    app: AppHandle,
+    profile: Profile,
+    settings: Settings,
+) -> Result<(), String> {
+    if profile.nickname.trim().is_empty() {
+        return Err("nickname is required".into());
+    }
+    if profile.birthday.len() != 10 {
+        return Err("birthday must be YYYY-MM-DD".into());
+    }
+    if crate::db::parse_date(&profile.birthday).is_none() {
+        return Err("birthday is not a valid date".into());
+    }
+
+    // Open the database for the first time. The password is random and stored
+    // in the OS keychain; a fresh install has nothing to decrypt yet.
+    if crate::state().db.get().is_none() {
+        let generated = generate_password();
+        let manager = DbManager::open_at(app_data_path(&app)?, &generated)
+            .await
+            .map_err(|e| e.to_string())?;
+        let _ = crate::state().db.set(manager.pool().clone());
+        let _ = crate::state().db_path.set(manager.path().to_path_buf());
+        store_password(&generated)?;
+    }
+
+    let pool = crate::state()
+        .db
+        .get()
+        .ok_or_else(|| "database not initialised".to_string())?;
+
+    let settings_json =
+        serde_json::to_string(&settings).map_err(|e| e.to_string())?;
+
+    sqlx::query(
+        "INSERT INTO profiles (id, nickname, birthday, install_date, settings_json)
+         VALUES (1, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET
+           nickname = excluded.nickname,
+           birthday = excluded.birthday,
+           settings_json = excluded.settings_json,
+           updated_at = datetime('now')",
+    )
+    .bind(profile.nickname.trim())
+    .bind(&profile.birthday)
+    .bind(&profile.install_date)
+    .bind(&settings_json)
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    // Background services need the pool, so start them only now.
+    let _ = crate::state().scheduler.start().await;
+
+    crate::window::show_main_window(&app);
+    Ok(())
+}
+
+fn app_data_path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
+    use tauri::Manager;
+    app.path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())
+        .map(|d| {
+            std::fs::create_dir_all(&d).ok();
+            d.join("echo.db")
+        })
+}
+
+/// 32 hex characters of OS randomness — enough entropy that guessing the
+/// database password is hopeless even if the keychain is later compromised.
+fn generate_password() -> String {
+    use rand::RngCore;
+    let mut bytes = [0u8; 16];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn store_password(password: &str) -> Result<(), String> {
+    let entry = keyring::Entry::new(KEYCHAIN_SERVICE, KEYCHAIN_USER)
+        .map_err(|e| format!("系统密码库不可用: {e}"))?;
+    entry
+        .set_password(password)
+        .map_err(|e| format!("无法写入系统密码库: {e}"))
+}
+
+pub fn retrieve_password() -> Result<String, String> {
+    let entry = keyring::Entry::new(KEYCHAIN_SERVICE, KEYCHAIN_USER)
+        .map_err(|e| format!("系统密码库不可用: {e}"))?;
+    entry
+        .get_password()
+        .map_err(|e| format!("无法读取系统密码库: {e}"))
+}
+
+/// Forget the stored password. Losing it means losing the database: there is no
+/// recovery path, so this is only called when the user explicitly resets.
+pub fn forget_password() {
+    if let Ok(entry) = keyring::Entry::new(KEYCHAIN_SERVICE, KEYCHAIN_USER) {
+        let _ = entry.delete_credential();
+    }
+}
+
+/// Reopen the database at boot using the stored password.
+pub async fn open_existing(app: &AppHandle) -> Result<(), String> {
+    let password = retrieve_password()?;
+    let manager = DbManager::open_at(app_data_path(app)?, &password)
+        .await
+        .map_err(|e| e.to_string())?;
+    let _ = crate::state().db.set(manager.pool().clone());
+    let _ = crate::state().db_path.set(manager.path().to_path_buf());
+    Ok(())
 }

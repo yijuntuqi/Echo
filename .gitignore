@@ -9,6 +9,10 @@ node_modules/
 dist/
 build/
 *.local
+# Vite writes these while loading a TS config; they are never source.
+vite.config.ts.timestamp-*
+*.tsbuildinfo
+*.log
 
 # Tauri
 src-tauri/target/

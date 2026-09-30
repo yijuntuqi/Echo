@@ -1,56 +1,67 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Echo",
-  "version": "1.0.0",
+  "version": "0.1.0",
   "identifier": "com.yijuntuqi.echo",
   "build": {
-    "beforeDevCommand": "pnpm dev",
+    "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "pnpm build",
+    "beforeBuildCommand": "npm run build",
     "frontendDist": "../dist"
   },
   "app": {
+    "withGlobalTauri": false,
     "windows": [
       {
-        "title": "Echo",
         "label": "main",
+        "title": "Echo",
         "url": "/",
-        "width": 1200,
-        "height": 800,
-        "minWidth": 800,
-        "minHeight": 600,
+        "width": 1040,
+        "height": 720,
+        "minWidth": 720,
+        "minHeight": 560,
         "resizable": true,
         "fullscreen": false,
-        "decorations": true,
-        "transparent": false,
+        "center": true,
         "visible": false
       },
       {
         "label": "pet",
+        "title": "Echo Pet",
         "url": "pet.html",
         "width": 200,
         "height": 200,
         "minWidth": 160,
         "minHeight": 160,
-        "maxWidth": 300,
-        "maxHeight": 300,
+        "maxWidth": 320,
+        "maxHeight": 320,
         "resizable": false,
-        "fullscreen": false,
         "decorations": false,
         "transparent": true,
         "alwaysOnTop": true,
         "skipTaskbar": true,
-        "visible": false,
-        "titleBarStyle": "overlay"
+        "shadow": false,
+        "visible": false
       }
     ],
     "security": {
-      "csp": "default-src 'self' data: blob:; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' https://api.chatanywhere.tech https://hf-mirror.com;"
+      "csp": {
+        "default-src": "'self'",
+        "img-src": "'self' data: blob:",
+        "style-src": "'self' 'unsafe-inline'",
+        "font-src": "'self' data:",
+        "connect-src": "'self' ipc: http://ipc.localhost https://api.chatanywhere.tech https://hf-mirror.com"
+      }
     }
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": ["nsis", "msi"],
+    "category": "Utility",
+    "shortDescription": "AI 电子宠物",
+    "longDescription": "Echo 是一只住在你桌面和手机桌面上的 AI 电子宠物。它会记得你说的话、你的心情和重要的事，并随着相处慢慢长大。",
+    "copyright": "Copyright © 2026 yijuntuqi",
+    "publisher": "yijuntuqi",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -59,39 +70,19 @@
       "icons/icon.ico"
     ],
     "windows": {
-      "nsis": {
-        "installerIcon": "icons/icon.ico",
-        "licenseFile": "LICENSE",
-        "welcomeMessage": "欢迎安装 Echo - 你的 AI 电子宠物",
-        "displayLanguageSelector": false
-      },
       "webviewInstallMode": {
-        "type": "downloadBootstrapper"
+        "type": "downloadBootstrapper",
+        "silent": true
       }
-    },
-    "android": {
-      "minSdkVersion": 26,
-      "targetSdkVersion": 34,
-      "versionCode": 1,
-      "permissions": [
-        "INTERNET",
-        "FOREGROUND_SERVICE",
-        "POST_NOTIFICATIONS",
-        "RECEIVE_BOOT_COMPLETED",
-        "WAKE_LOCK"
-      ]
     }
   },
   "plugins": {
-    "shell": {
-      "allowlist": [
-        { "name": "open", "cmd": "open", "args": true },
-        { "name": "xdg-open", "cmd": "xdg-open", "args": true }
-      ]
-    },
     "updater": {
-      "endpoints": ["https://api.github.com/repos/yijuntuqi/Echo/releases/latest"],
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IHRoaXMga2V5IGlzIG5vdCB1c2VkIGZvciBwcm9kdWN0aW9uLg==",
+      "active": true,
+      "dialog": false,
+      "endpoints": [
+        "https://github.com/yijuntuqi/Echo/releases/latest/download/latest.json"
+      ],
       "windows": {
         "installMode": "passive"
       }

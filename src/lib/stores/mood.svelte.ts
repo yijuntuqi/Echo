@@ -1,5 +1,5 @@
-// Mood Store - Mood entries & heatmap data
-import { browser } from '$app/environment';
+﻿// Mood Store - Mood entries & heatmap data
+import { isBrowser as browser } from '$lib/utils/env';
 import type { MoodEntry } from '$lib/api/types';
 
 function createMoodStore() {

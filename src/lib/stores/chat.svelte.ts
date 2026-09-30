@@ -1,92 +1,120 @@
-// Chat Store - Streaming conversation state
-import { browser } from '$app/environment';
-import type { Conversation, ChatChunk, Emotion } from '$lib/api/types';
+﻿import { isBrowser as browser } from '$lib/utils/env';
+import type { Emotion } from '$lib/api/types';
 
-interface Message {
-    id: string;
-    role: 'user' | 'assistant';
-    content: string;
-    streamingContent: string;
-    isStreaming: boolean;
-    emotion?: Emotion;
-    emotionWeight?: number;
-    timestamp: Date;
-    topics?: string[];
+export interface Message {
+  id: string;
+  role: 'user' | 'assistant';
+  content: string;
+  isStreaming: boolean;
+  emotion?: Emotion;
+  emotionWeight?: number;
+  topics?: string[];
+  timestamp: Date;
 }
 
+const HISTORY_KEY = 'chat:messages';
+const MAX_CACHED = 50;
+
 function createChatStore() {
-    let messages = $state<Message[]>([]);
-    let isStreaming = $state(false);
-    let currentMessageId = $state<string | null>(null);
-    let inputValue = $state('');
-    let quotaRemaining = $state<number | null>(null);
-    let isOffline = $state(false);
-    
-    const visibleMessages = $derived(
-        messages.filter(m => !m.isStreaming || m.streamingContent.length > 0)
+  let messages = $state<Message[]>([]);
+  let isStreaming = $state(false);
+  let activeId = $state<string | null>(null);
+  let inputValue = $state('');
+  let quotaRemaining = $state<number | null>(null);
+  let isOffline = $state(false);
+
+  const visibleMessages = $derived(messages);
+  const canSend = $derived(!isStreaming && inputValue.trim().length > 0);
+
+  function addUserMessage(content: string): void {
+    messages = [
+      ...messages,
+      { id: crypto.randomUUID(), role: 'user', content, isStreaming: false, timestamp: new Date() },
+    ];
+  }
+
+  function startStream(): string {
+    const id = crypto.randomUUID();
+    activeId = id;
+    isStreaming = true;
+    messages = [
+      ...messages,
+      { id, role: 'assistant', content: '', isStreaming: true, timestamp: new Date() },
+    ];
+    return id;
+  }
+
+  /** Append streamed text to whichever assistant message is currently open. */
+  function appendDelta(delta: string): void {
+    if (!activeId || !delta) return;
+    messages = messages.map((m) =>
+      m.id === activeId ? { ...m, content: m.content + delta } : m,
     );
-    
-    function addUserMessage(content: string) {
-        messages = [...messages, {
-            id: crypto.randomUUID(),
-            role: 'user',
-            content,
-            streamingContent: content,
+  }
+
+  function endStream(meta?: { emotion?: Emotion; weight?: number; topics?: string[] }): void {
+    if (!activeId) return;
+    const id = activeId;
+    messages = messages.map((m) =>
+      m.id === id
+        ? {
+            ...m,
             isStreaming: false,
-            timestamp: new Date(),
-        }];
+            emotion: meta?.emotion,
+            emotionWeight: meta?.weight,
+            topics: meta?.topics,
+          }
+        : m,
+    );
+    activeId = null;
+    isStreaming = false;
+  }
+
+  function setInput(v: string): void { inputValue = v; }
+  function clearInput(): void { inputValue = ''; }
+  function setQuota(n: number): void { quotaRemaining = n; }
+  function setOffline(v: boolean): void { isOffline = v; }
+  function reset(): void { messages = []; activeId = null; isStreaming = false; }
+
+  if (browser) {
+    try {
+      const raw = localStorage.getItem(HISTORY_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw) as (Omit<Message, 'timestamp'> & { timestamp: string })[];
+        messages = parsed.slice(-MAX_CACHED).map((m) => ({ ...m, timestamp: new Date(m.timestamp) }));
+      }
+    } catch {
+      // Corrupt cache: start clean rather than blocking the app.
     }
-    
-    function startStream() {
-        isStreaming = true;
-        const id = crypto.randomUUID();
-        currentMessageId = id;
-        messages = [...messages, {
-            id, role: 'assistant', content: '', streamingContent: '',
-            isStreaming: true, timestamp: new Date(),
-        }];
-    }
-    
-    function appendChunk(chunk: ChatChunk) {
-        if (!currentMessageId) return;
-        messages = messages.map(m => {
-            if (m.id !== currentMessageId) return m;
-            const delta = chunk.choices[0]?.delta?.content ?? '';
-            return { ...m, content: m.content + delta, streamingContent: m.streamingContent + delta };
-        });
-    }
-    
-    function endStream(emotion?: Emotion, weight?: number, topics?: string[]) {
-        if (!currentMessageId) return;
-        messages = messages.map(m => {
-            if (m.id !== currentMessageId) return m;
-            return { ...m, isStreaming: false, emotion, emotionWeight: weight, topics };
-        });
-        isStreaming = false;
-        currentMessageId = null;
-    }
-    
-    function setQuota(remaining: number) { quotaRemaining = remaining; }
-    function setOffline(v: boolean) { isOffline = v; }
-    function setInput(v: string) { inputValue = v; }
-    function clearInput() { inputValue = ''; }
-    
-    if (browser) {
-        const saved = localStorage.getItem('chat:messages');
-        if (saved) { try { messages = JSON.parse(saved).slice(-50); } catch {} }
-        $effect(() => { localStorage.setItem('chat:messages', JSON.stringify(messages.slice(-50))); });
-    }
-    
-    return {
-        get messages() { return messages; },
-        get visibleMessages() { return visibleMessages; },
-        get isStreaming() { return isStreaming; },
-        get inputValue() { return inputValue; },
-        get quotaRemaining() { return quotaRemaining; },
-        get isOffline() { return isOffline; },
-        addUserMessage, startStream, appendChunk, endStream,
-        setQuota, setOffline, setInput, clearInput,
-    };
+
+    $effect(() => {
+      const snapshot = messages.slice(-MAX_CACHED).map((m) => ({ ...m, timestamp: m.timestamp.toISOString() }));
+      try {
+        localStorage.setItem(HISTORY_KEY, JSON.stringify(snapshot));
+      } catch {
+        // Quota exceeded: drop the cache, keep the in-memory session.
+      }
+    });
+  }
+
+  return {
+    get messages() { return messages; },
+    get visibleMessages() { return visibleMessages; },
+    get isStreaming() { return isStreaming; },
+    get inputValue() { return inputValue; },
+    get canSend() { return canSend; },
+    get quotaRemaining() { return quotaRemaining; },
+    get isOffline() { return isOffline; },
+    addUserMessage,
+    startStream,
+    appendDelta,
+    endStream,
+    setInput,
+    clearInput,
+    setQuota,
+    setOffline,
+    reset,
+  };
 }
 
 export const chatStore = createChatStore();
