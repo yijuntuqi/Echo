@@ -24,7 +24,9 @@
     "paths": {
       "$lib": ["src/lib/index.ts"],
       // Rune stores use the `.svelte.ts` extension, which TS does not probe on
-      // its own; this more specific pattern must be listed to win over `$lib/*`.
+      // its own; these more specific patterns must be listed to win over
+      // `$lib/*`.
+      "$lib/router": ["src/lib/router.svelte.ts"],
       "$lib/stores/*": ["src/lib/stores/*.svelte.ts"],
       "$lib/*": ["src/lib/*"],
       "$api/*": ["src/lib/api/*"],

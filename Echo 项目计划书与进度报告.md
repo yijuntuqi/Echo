@@ -135,8 +135,8 @@ npm install
 # 开发时指定数据库密码（跳过首运向导）
 ECHO_DB_PASSWORD=yourpassword npx tauri dev
 
-# 调试日志
-RUST_LOG=echo=debug,tauri=info npx tauri dev
+# 调试日志（代码读取的是 ECHO_LOG，不是 RUST_LOG）
+ECHO_LOG=echo=debug,info npx tauri dev
 
 # 强制重新下载模型
 ECHO_FORCE_MODEL_DOWNLOAD=1 npx tauri dev
@@ -177,6 +177,7 @@ ECHO_FORCE_MODEL_DOWNLOAD=1 npx tauri dev
 | `npx tauri dev` 卡住 | Vite 未绑定 1420 端口 / 防火墙 | `netstat -ano` |
 | vendored OpenSSL 编译失败 | `Can't locate Locale/Maketext/Simple.pm` | 装 Strawberry Perl（C:\Strawberry）；`.cargo/config.toml` 已用 `OPENSSL_SRC_PERL` 钉死路径。注意 cargo 配置按**当前工作目录**向上发现，`--manifest-path` 从别的目录跑不会生效 |
 | `PRAGMA key = x'...'` 语法错误 | 开库失败 `near "x'...'": syntax error` | SQLite pragma 值不收 blob 字面量；SQLCipher raw key 必须写成 `"x'...'"`（带双引号，见 db.rs `open_at`）。另：`kdf_iter = 100_000` 的下划线数字同样非法，已删，用 v4 默认 256000 |
+| rune 写在普通 `.ts` 里 | 白屏，Console 报 `rune_outside_svelte` | `$state` 等 rune 只能在 `.svelte.ts` / `.svelte` 文件用；`router.ts` 已改名 `router.svelte.ts`，且 tsconfig 需加精确 paths 映射 `$lib/router`（TS 不自动探测 `.svelte.ts`）。`npm run build` 不报这类错，只在运行时炸 |
 
 ## 7. 下一步行动建议（交接给 Claude Code）
 
