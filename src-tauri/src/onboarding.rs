@@ -92,7 +92,7 @@ pub async fn complete_onboarding(
     .map_err(|e| e.to_string())?;
 
     // Background services need the pool, so start them only now.
-    let _ = crate::state().scheduler.start().await;
+    let _ = crate::state().scheduler.start(&app).await;
 
     // The key the user just typed (or left blank) becomes live immediately.
     apply_chat_key_from_db(pool).await;

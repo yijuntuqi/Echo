@@ -26,12 +26,28 @@ impl Scheduler {
     }
 
     /// Register the recurring jobs and start the scheduler.
-    pub async fn start(&self) -> Result<(), String> {
+    pub async fn start(&self, app: &tauri::AppHandle) -> Result<(), String> {
         let sched = self.get_or_init();
 
         // 08:00 local — birthday and anniversary greetings.
         self.add(sched, "0 0 8 * * *", "anniversary-check", || async {
             tracing::info!("checking anniversaries");
+        })
+        .await?;
+
+        // 09:10 local — daily evolution check: time alone keeps a neglected
+        // pet creeping forward, and it catches up on anything the per-turn
+        // evaluations missed.
+        let evo_app = app.clone();
+        self.add(sched, "0 10 9 * * *", "evolution-check", move || {
+            let app = evo_app.clone();
+            async move {
+                if let Some(evolved) =
+                    crate::evolution::evaluate(&app, crate::evolution::Trigger::TimeElapsed).await
+                {
+                    tracing::info!(to = evolved.to_stage.as_str(), "daily check evolved the pet");
+                }
+            }
         })
         .await?;
 

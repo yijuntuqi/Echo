@@ -2,7 +2,7 @@
 
 - **项目名称**：Echo — AI 桌面/移动端电子宠物
 - **代码仓库**：`git@github.com:yijuntuqi/Echo.git`
-- **当前分支**：`main`（最新提交 `1afa437`；工作区有 Task 6 未提交改动）
+- **当前分支**：`feature/chat-pipeline-tasks4-8`（Task 4-7 已提交；`main` 停在 `a1f2a60`，合并/推送待定）
 - **技术栈**：Tauri 2 + Rust + Svelte 5 + Vite 6 + SQLCipher + sqlx + Candle
 - **目标平台**：Windows 10/11 (EXE/MSI)、Android 8+ (APK/AAB)
 
@@ -66,9 +66,9 @@ Echo 是一只住在用户桌面/手机桌面上的 AI 电子宠物。它会：
 
 | 任务 | 优先级 | 预估工时 | 依赖 | 备注 |
 | --- | --- | --- | --- | --- |
-| Task 6: 情绪字段回传闭环 | 🟡 代码完成，待编译验证 | — | Strawberry Perl（用户手动安装） | 后端 `classify`/`persist_turn`/`mood:updated` + 前端热力图实时接线均已写好；被 vendored OpenSSL 构建阻塞，见 §7 |
-| Task 7: 进化触发闭环 | 🟢 低 | 1 天 | Task 6 | 定时/事件触发 `EvolutionEngine::evaluate`、推送 `evolution:triggered` |
-| Task 8: 生日/周年/每日回顾内容生成 | 🟢 低 | 1 天 | Task 4 | 调用 premium 模型生成回顾卡片、写 events、系统通知 |
+| Task 6: 情绪字段回传闭环 | ✅ (commit `b5362ad`) | `chat.rs` / `emotion.rs` / `App.svelte` | 规则+模型融合分类、conversations/moods 落库、`mood:updated` 实时热力图；附带修好 SQLCipher key 语法（`764fbb9`） |
+| Task 7: 进化触发闭环 | ✅ (本轮提交) | `evolution.rs` / `scheduler.rs` / `chat.rs` | 每轮对话 + 每日 09:10 双触发 `evaluate`、推送 `evolution:triggered`、双窗口动画；`get_evolution_state` 带实时 progress |
+| Task 8: 生日/周年/每日回顾内容生成 | 🟢 低 | 1 天 | Task 4 | 调用 premium 模型生成回顾卡片、写 events、系统通知；调度器任务位已就绪（现为日志占位） |
 | Task 9: Windows 代码签名 & 自动更新 | 🟢 低 | 1 天 | 证书 | NSIS/MSI 签名、GitHub Releases 更新端点 |
 | Task 10: Android 打包 & 预编译 sqlite-vec | 🟢 低 | 2 天 | NDK 环境 | aarch64 预编译 .so、APK/AAB 签名 |
 | Task 11: 宠物 SVG 素材制作 | 🟡 中 | 1-2 天 | 设计 | 5 阶段 × 6 状态 = 30 个 SVG (200×200) |
@@ -182,17 +182,18 @@ ECHO_FORCE_MODEL_DOWNLOAD=1 npx tauri dev
 
 ### 立即可做（阻塞最少）
 
-**安装 Strawberry Perl（用户手动）→ 验证 Task 6** — 工作区的 Task 6 代码（情绪闭环）已完成但无法编译：
+**Task 8: 生日/周年/每日回顾内容生成** — 调度器任务位已就绪（`scheduler.rs` 中 anniversary-check / daily-recap 仍是日志占位）：
 
-- `Cargo.toml` 已切换到真 SQLCipher（`bundled-sqlcipher` + vendored OpenSSL）
-- OpenSSL 源码构建需要完整 Perl（含 `Locale::Maketext::Simple`），Git Bash 的 MSYS perl 缺模块
-- 已在 `.cargo/config.toml` 用 `OPENSSL_SRC_PERL` 钉死 `C:/Strawberry/perl/bin/perl.exe`
-- 装好后：`cargo test --manifest-path src-tauri/Cargo.toml`，通过即提交 Task 6
+- 复用 `ChatEngine::complete`（Task 6 加的非流式接口，premium 模型）
+- 生成回顾卡片写 `events`，走 `notification:show` 或系统通知
+- 提醒：工作区 `.cargo/config.toml` 假设 Strawberry Perl 装在 `C:\Strawberry`（已装 ✓）
+
+**运维清理（用户手动）**：`E:\...\Echo\src-tauri\target\` 残留约 17 GB 旧编译产物（现编译走 `D:\cargo-target\echo`），确认后可整个删除。
 
 ### 短期（1 周内）
 
-- Task 7: 进化触发闭环（定时/事件触发 `EvolutionEngine::evaluate`，推送 `evolution:triggered`）
-- Task 8: 生日/周年/每日回顾内容生成（`ChatEngine::complete` 已就绪，非流式接口可复用）
+- feature 分支合并回 `main` 并推送（`main` 尚停在 Task 3 之前的 `a1f2a60`）
+- Task 9-10: 代码签名 / Android 打包（需证书与 NDK，均依赖用户侧环境）
 - 宠物 SVG 素材（可先用占位图，后续替换）
 
 ### 中期（发布前）

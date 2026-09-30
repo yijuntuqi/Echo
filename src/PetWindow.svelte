@@ -4,20 +4,40 @@
   import PetAvatar from '$lib/components/pet/PetAvatar.svelte';
   import { petStore } from '$lib/stores/pet';
   import { getPetPosition, showPetOverlay } from '$lib/api/commands';
+  import { on } from '$lib/api/events';
 
-  onMount(async () => {
-    // Restore last known position, then reveal the window.
-    try {
-      const pos = await getPetPosition();
-      if (pos) petStore.setPosition({ x: pos.x, y: pos.y });
-    } catch {
-      /* first run: no saved position yet */
-    }
-    try {
-      await showPetOverlay();
-    } catch {
-      /* window may already be visible */
-    }
+  onMount(() => {
+    // Keep the teardown synchronous; do the async work inside.
+    let disposed = false;
+    let unlistenEvolution: (() => void) | undefined;
+
+    void (async () => {
+      // Restore last known position, then reveal the window.
+      try {
+        const pos = await getPetPosition();
+        if (!disposed && pos) petStore.setPosition({ x: pos.x, y: pos.y });
+      } catch {
+        /* first run: no saved position yet */
+      }
+      try {
+        await showPetOverlay();
+      } catch {
+        /* window may already be visible */
+      }
+
+      // This window owns the avatar, so it — not the main window — plays the
+      // evolve animation when the backend pushes a transition.
+      const unlisten = await on('evolution:triggered', (e) => {
+        petStore.setStage(e.to_stage);
+      });
+      if (disposed) unlisten();
+      else unlistenEvolution = unlisten;
+    })();
+
+    return () => {
+      disposed = true;
+      unlistenEvolution?.();
+    };
   });
 </script>
 

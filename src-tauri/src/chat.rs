@@ -585,6 +585,14 @@ pub async fn send_message(app: tauri::AppHandle, message: String) -> Result<(), 
         if let Some(mood) = persist_turn(pool, &message, &outcome, read.as_ref()).await {
             let _ = app.emit("mood:updated", mood);
         }
+
+        // The turn itself is an interaction signal. The evaluation is three
+        // small queries; growth here never blocks or fails the reply path.
+        if let Some(evolved) =
+            crate::evolution::evaluate(&app, crate::evolution::Trigger::InteractionMilestone).await
+        {
+            tracing::info!(to = evolved.to_stage.as_str(), "chat turn evolved the pet");
+        }
     }
 
     Ok(())

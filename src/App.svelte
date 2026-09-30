@@ -7,6 +7,8 @@
   import { on } from '$lib/api/events';
   import { settingsStore } from '$lib/stores/settings';
   import { moodStore } from '$lib/stores/mood';
+  import { petStore } from '$lib/stores/pet';
+  import { evolutionStore } from '$lib/stores/evolution';
 
   import HomePage from './pages/HomePage.svelte';
   import DashboardPage from './pages/DashboardPage.svelte';
@@ -52,6 +54,22 @@
       });
       if (disposed) unlistenMood();
       else cleanups.push(unlistenMood);
+
+      // The pet grew: mirror the transition into the dashboard store and
+      // replay the evolve animation.
+      const unlistenEvolution = await on('evolution:triggered', (e) => {
+        evolutionStore.applyEvolution({
+          timestamp: new Date().toISOString(),
+          from_stage: e.from_stage,
+          to_stage: e.to_stage,
+          trigger_type: e.trigger,
+          personality_vector: e.personality,
+          score: e.score,
+        });
+        petStore.setStage(e.to_stage);
+      });
+      if (disposed) unlistenEvolution();
+      else cleanups.push(unlistenEvolution);
     })();
 
     return () => {

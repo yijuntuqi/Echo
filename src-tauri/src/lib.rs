@@ -134,7 +134,7 @@ pub fn run() {
                         window::show_main_window(&boot);
                         // Keep greetings on their own schedule rather than
                         // firing the moment the app restarts.
-                        if let Err(e) = state().scheduler.start().await {
+                        if let Err(e) = state().scheduler.start(&boot).await {
                             tracing::warn!("scheduler did not start: {e}");
                         }
                     }

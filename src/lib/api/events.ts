@@ -3,7 +3,7 @@
 // `listen` is re-exported under a distinct name so call sites read as domain
 // events (`onPetStateChange`) rather than generic IPC plumbing.
 import { listen as tauriListen, emit as tauriEmit, type UnlistenFn } from '@tauri-apps/api/event';
-import type { Emotion } from './types';
+import type { Emotion, Stage } from './types';
 
 export type EmotionEvent = {
   emotion: Emotion;
@@ -23,9 +23,12 @@ export type StatusEvent = {
 };
 
 export type EvolutionEvent = {
-  from_stage: string;
-  to_stage: string;
+  from_stage: Stage;
+  to_stage: Stage;
   trigger: string;
+  /** The 32 f32 personality dimensions at the moment of transition. */
+  personality: number[];
+  score: number;
 };
 
 export type ModelProgress = {
