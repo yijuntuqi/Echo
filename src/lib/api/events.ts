@@ -28,6 +28,17 @@ export type EvolutionEvent = {
   trigger: string;
 };
 
+export type ModelProgress = {
+  file: string;
+  downloaded: number;
+  total: number;
+};
+
+export type ModelDone = {
+  ok: boolean;
+  error?: string;
+};
+
 interface EventMap {
   'chat:stream': StreamChunk;
   'chat:status': StatusEvent;
@@ -36,6 +47,8 @@ interface EventMap {
   'evolution:triggered': EvolutionEvent;
   'mood:updated': { date: string; emotion: Emotion; weight: number };
   'notification:show': { title: string; body: string };
+  'model:progress': ModelProgress;
+  'model:done': ModelDone;
 }
 
 type Handler<K extends keyof EventMap> = (payload: EventMap[K]) => void;

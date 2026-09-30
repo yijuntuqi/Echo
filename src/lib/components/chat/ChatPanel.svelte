@@ -3,6 +3,7 @@
   import { onMount, onDestroy } from 'svelte';
   import { chatStore } from '$lib/stores/chat';
   import { petStore } from '$lib/stores/pet';
+  import { systemStore } from '$lib/stores/system';
   import { sendMessage, setClickThrough } from '$lib/api/commands';
   import { on } from '$lib/api/events';
   import MessageList from './MessageList.svelte';
@@ -27,6 +28,12 @@
         if (typeof s.offline === 'boolean') chatStore.setOffline(s.offline);
         if (typeof s.quota_remaining === 'number') chatStore.setQuota(s.quota_remaining);
       }),
+    );
+    cleanups.push(
+      await on('model:progress', (p) => systemStore.setModelProgress(p)),
+    );
+    cleanups.push(
+      await on('model:done', (d) => systemStore.setModelDone(d)),
     );
   });
 
@@ -56,11 +63,39 @@
     }
   }
 
+  // Progress of the currently downloading model file; `null` while unknown.
+  const modelPercent = $derived.by(() => {
+    const p = systemStore.modelProgress;
+    if (!p || p.total <= 0) return null;
+    return Math.min(100, Math.round((p.downloaded / p.total) * 100));
+  });
+
   function close() { open = false; }
 </script>
 
 {#if open}
   <section class="chat-panel" aria-label="与 Echo 对话">
+    {#if systemStore.modelState === 'downloading' && systemStore.modelProgress}
+      <div class="model-download">
+        <span class="model-file">{systemStore.modelProgress.file}</span>
+        {#if modelPercent !== null}
+          <div class="model-bar" role="progressbar" aria-valuenow={modelPercent} aria-valuemin={0} aria-valuemax={100}>
+            <div class="model-fill" style="width: {modelPercent}%"></div>
+          </div>
+          <span class="model-pct">{modelPercent}%</span>
+        {:else}
+          <span class="model-pct">下载中…</span>
+        {/if}
+      </div>
+    {:else if systemStore.modelState === 'failed'}
+      <button
+        class="model-failed"
+        onclick={() => systemStore.dismissModelError()}
+        title={systemStore.modelError || ''}
+      >
+        模型下载失败，下次对话将重试（点击关闭）
+      </button>
+    {/if}
     <header class="chat-header">
       <h3>Echo</h3>
       <div class="status">
@@ -124,4 +159,45 @@
     padding: 0 4px;
   }
   .close-btn:hover { color: var(--color-text); }
+  .model-download {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 16px;
+    border-bottom: 1px solid var(--color-border);
+    font-size: 11px;
+    color: var(--color-text-muted);
+  }
+  .model-file {
+    max-width: 150px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .model-bar {
+    flex: 1;
+    height: 3px;
+    border-radius: 2px;
+    background: var(--color-border);
+    overflow: hidden;
+  }
+  .model-fill {
+    height: 100%;
+    background: var(--color-accent);
+    transition: width 0.2s ease;
+  }
+  .model-pct { flex-shrink: 0; }
+  .model-failed {
+    display: block;
+    width: 100%;
+    padding: 6px 16px;
+    border: none;
+    border-bottom: 1px solid var(--color-border);
+    background: var(--color-accent-alpha);
+    color: var(--color-text);
+    font-size: 11px;
+    text-align: left;
+    cursor: pointer;
+  }
+  .model-failed:hover { background: var(--color-accent); color: #fff; }
 </style>

@@ -375,6 +375,10 @@ fn pool() -> Result<&'static crate::db::DbPool, String> {
 /// Send a message. The reply arrives asynchronously over `chat:stream`.
 #[tauri::command]
 pub async fn send_message(app: tauri::AppHandle, message: String) -> Result<(), String> {
+    // First use triggers the embedding-model download. Near-instant: it is a
+    // no-op when cached, or spawns and returns while a download runs.
+    crate::model::kickoff(&app).await;
+
     let engine = &crate::state().chat;
     let history = recent_history(20).await;
 

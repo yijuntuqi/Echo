@@ -10,6 +10,7 @@ pub mod db;
 pub mod embedding;
 pub mod emotion;
 pub mod evolution;
+pub mod model;
 pub mod onboarding;
 pub mod scheduler;
 pub mod vector;
@@ -113,6 +114,10 @@ pub fn run() {
 
             // Touch the state so every later command finds it initialised.
             state();
+
+            // Point the embedding service at its cache directory so the
+            // first chat message can trigger the model download.
+            model::init(&handle);
 
             // The pet overlay, tray, and hotkey come up first so the app stays
             // reachable even before the database exists.
