@@ -94,7 +94,8 @@ fn build_pet_window(app: &AppHandle) -> Result<WebviewWindow, Box<dyn std::error
         .title("Echo Pet")
         .inner_size(200.0, 200.0)
         .min_inner_size(160.0, 160.0)
-        .max_inner_size(300.0, 300.0)
+        // No max: the window grows to ~592x560 while the chat panel is
+        // docked beside the pet, then shrinks back programmatically.
         .resizable(false)
         .decorations(false)
         .transparent(true)
@@ -187,7 +188,9 @@ fn register_hotkey(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
     let shortcut = Shortcut::new(Some(Modifiers::CONTROL | Modifiers::ALT), Code::KeyE);
     app.global_shortcut()
         .on_shortcut(shortcut, |app, _sc, _event| {
-            toggle_pet_window(app);
+            // Surface the main window: that is what users expect a global
+            // hotkey to do. The pet itself is reachable via tray and click.
+            show_main_window(app);
         })
         .map_err(|e| format!("could not register Ctrl+Alt+E: {e}"))?;
     Ok(())
@@ -274,10 +277,11 @@ pub fn set_pet_position(app: AppHandle, x: f64, y: f64) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
-/// Surface the main window and tell its frontend to open the chat panel.
+/// Open the chat panel next to the pet. The panel lives in the pet window
+/// (so it can follow the pet around); this only raises the `chat:open`
+/// event, which the pet window answers by expanding and showing the panel.
 #[tauri::command]
 pub fn open_chat(app: AppHandle) -> Result<(), String> {
-    show_main_window(&app);
     app.emit("chat:open", ())
         .map_err(|e| e.to_string())
 }

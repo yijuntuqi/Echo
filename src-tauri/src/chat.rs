@@ -226,6 +226,9 @@ impl ChatEngine {
     ) -> Result<CompletionOutcome, ChatError> {
         let cfg = self.config();
         if cfg.api_key.is_empty() {
+            tracing::error!(
+                "no LLM key configured: put ECHO_SHARED_KEY=<key> in the project .env (UTF-8/ASCII), or set your own key in settings"
+            );
             return Err(ChatError::NotConfigured);
         }
         let model = self.model_for(use_premium);
@@ -240,10 +243,20 @@ impl ChatEngine {
 
         let url = format!("{}/chat/completions", cfg.base_url.trim_end_matches('/'));
         let mut attempt = 0u32;
+        // Once any delta has been forwarded to the panel, a retry must not
+        // happen: the second attempt re-streams the full reply, which would
+        // land on top of the first half and duplicate everything.
+        let mut emitted = false;
         loop {
-            let result = self
-                .attempt_stream(&url, &cfg.api_key, &body, &model, &mut on_delta)
-                .await;
+            let result = {
+                let emitted = &mut emitted;
+                let on_delta = &mut on_delta;
+                self.attempt_stream(&url, &cfg.api_key, &body, &model, &mut |delta| {
+                    *emitted = true;
+                    on_delta(delta);
+                })
+                .await
+            };
             match result {
                 Ok(outcome) => return Ok(outcome),
                 Err(err) => {
@@ -252,6 +265,10 @@ impl ChatEngine {
                         ChatError::Api { status, .. } => *status >= 500,
                         _ => false,
                     };
+                    if emitted {
+                        tracing::warn!("stream interrupted mid-reply; not retrying to avoid duplicated deltas");
+                        return Err(err);
+                    }
                     attempt += 1;
                     if !retryable || attempt > cfg.retry_max {
                         return Err(err);
@@ -305,6 +322,9 @@ impl ChatEngine {
                 let line: String = pending.drain(..=idx).collect();
                 let line = line.trim_end_matches(['\r', '\n']);
                 if let Some(frame) = line.strip_prefix("data:") {
+                    // Raw frames at debug level: protocol mismatches (e.g.
+                    // SenseNova's empty-choices usage frame) show up here.
+                    tracing::debug!(line = %line, "sse frame");
                     let frame = frame.trim_start();
                     if frame == "[DONE]" {
                         return Ok(CompletionOutcome {
@@ -366,6 +386,9 @@ impl ChatEngine {
     ) -> Result<CompletionOutcome, ChatError> {
         let cfg = self.config();
         if cfg.api_key.is_empty() {
+            tracing::error!(
+                "no LLM key configured: put ECHO_SHARED_KEY=<key> in the project .env (UTF-8/ASCII), or set your own key in settings"
+            );
             return Err(ChatError::NotConfigured);
         }
         let model = self.model_for(use_premium);
@@ -525,6 +548,7 @@ fn pool() -> Result<&'static crate::db::DbPool, String> {
 /// Send a message. The reply arrives asynchronously over `chat:stream`.
 #[tauri::command]
 pub async fn send_message(app: tauri::AppHandle, message: String) -> Result<(), String> {
+    tracing::info!(chars = message.chars().count(), "send_message");
     // First use triggers the embedding-model download. Near-instant: it is a
     // no-op when cached, or spawns and returns while a download runs.
     crate::model::kickoff(&app).await;
@@ -565,6 +589,7 @@ pub async fn send_message(app: tauri::AppHandle, message: String) -> Result<(), 
             return Err("模型没有返回内容，请稍后再试".into());
         }
         Err(e) => {
+            tracing::error!(error = %e, "chat completion failed");
             let _ = app.emit(
                 "chat:status",
                 StatusEvent { offline: true, quota_remaining: None },
@@ -773,6 +798,45 @@ mod tests {
         assert_eq!(outcome.prompt_tokens, Some(5));
         assert_eq!(outcome.completion_tokens, Some(3));
         assert_eq!(outcome.model, engine.config().daily_model);
+    }
+
+    #[tokio::test]
+    async fn streams_sensenova_frame_shape_without_duplicating() {
+        // Frames exactly as SenseNova sends them (captured via curl): a
+        // role-only first frame, `reasoning` deltas (not reasoning_content),
+        // `content` deltas, an empty delta right before finish, then a
+        // usage-only frame carrying an empty choices array, then [DONE].
+        let chunks = vec![
+            chunk(r#"{"role":"assistant"}"#),
+            chunk(r#"{"reasoning":"The user is asking"}"#),
+            chunk(r#"{"reasoning":" for three sentences."}"#),
+            chunk(r#"{"content":"\n\n好的，以下是三句话：\n\n"}"#),
+            chunk(r#"{"content":"1. 今天天气不错。\n"}"#),
+            chunk(r#"{"content":"2. 心情很平静。\n"}"#),
+            chunk(r#"{"content":"3. 祝你有美好的一天。"}"#),
+            chunk(r#"{}"#),
+            r#"{"id":"t","choices":[],"usage":{"prompt_tokens":9,"completion_tokens":21,"total_tokens":30}}"#.to_string(),
+        ];
+        let (port, _hits) = spawn_server(vec![sse_response(&chunks)]).await;
+
+        let mut forwarded = String::new();
+        let engine = engine(port);
+        let outcome = engine
+            .stream_completion(
+                vec![ChatMessage::user("说三句话")],
+                false,
+                |d| forwarded.push_str(d),
+            )
+            .await
+            .unwrap();
+
+        let expected = "\n\n好的，以下是三句话：\n\n1. 今天天气不错。\n2. 心情很平静。\n3. 祝你有美好的一天。";
+        assert_eq!(outcome.reply, expected);
+        // What the panel sees must equal what the parser accumulated: no
+        // duplicated or missing deltas anywhere in the chain.
+        assert_eq!(forwarded, expected);
+        assert_eq!(outcome.prompt_tokens, Some(9));
+        assert_eq!(outcome.completion_tokens, Some(21));
     }
 
     #[tokio::test]

@@ -33,8 +33,6 @@
         "height": 200,
         "minWidth": 160,
         "minHeight": 160,
-        "maxWidth": 320,
-        "maxHeight": 320,
         "resizable": false,
         "decorations": false,
         "transparent": true,

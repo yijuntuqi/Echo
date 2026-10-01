@@ -1,8 +1,8 @@
-<!-- App shell: hosts the hash router and global overlays -->
+<!-- App shell: hosts the hash router and global overlays. The chat panel
+     lives in the pet window so it can follow the pet around. -->
 <script lang="ts">
   import { onMount } from 'svelte';
   import { router, goto } from '$lib/router';
-  import ChatPanel from '$lib/components/chat/ChatPanel.svelte';
   import { getSettings, getOnboardingStatus } from '$lib/api/commands';
   import { on } from '$lib/api/events';
   import { settingsStore } from '$lib/stores/settings';
@@ -16,7 +16,6 @@
   import OnboardingPage from './pages/OnboardingPage.svelte';
 
   let booting = $state(true);
-  let chatOpen = $state(false);
 
   onMount(() => {
     // Keep the teardown synchronous; do the async work inside.
@@ -39,18 +38,6 @@
         console.warn('onboarding status unavailable:', e);
       } finally {
         if (!disposed) booting = false;
-      }
-
-      // The pet window asks the main window to open the chat panel. Each
-      // listener registers independently: one failure must not break the rest.
-      try {
-        const unlisten = await on('chat:open', () => {
-          chatOpen = true;
-        });
-        if (disposed) unlisten();
-        else cleanups.push(unlisten);
-      } catch (e) {
-        console.warn('chat:open listener unavailable:', e);
       }
 
       // A finished turn carries today's emotional read; keep the heatmap live.
@@ -98,7 +85,6 @@
   {:else if router.current === '/onboarding'}
     <OnboardingPage />
   {:else}
-    <ChatPanel bind:open={chatOpen} />
     {#if router.current === '/'}
       <HomePage />
     {:else if router.current === '/dashboard'}

@@ -55,6 +55,16 @@
     void hits;
     draw();
   });
+
+  // First paint can land before layout gives the canvas its size; redraw
+  // whenever the element itself is resized.
+  $effect(() => {
+    const el = canvas;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(() => draw());
+    ro.observe(el);
+    return () => ro.disconnect();
+  });
 </script>
 
 <canvas bind:this={canvas} aria-label="语义记忆分布"></canvas>

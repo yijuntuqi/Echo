@@ -5,8 +5,11 @@
   import { openChat } from '$lib/api/commands';
   import { petStore } from '$lib/stores/pet';
 
+  // Callback prop, not a dispatcher event: the parent owns what "open chat"
+  // means (the pet window expands and docks the panel).
+  let { onopenchat }: { onopenchat?: () => void } = $props();
+
   const dispatch = createEventDispatcher<{
-    openChat: void;
     contextMenu: { x: number; y: number };
   }>();
 
@@ -88,8 +91,10 @@
     }
     petStore.playAnimation('react');
     petStore.touch();
-    // The chat panel lives in the main window; ask the backend to surface it.
-    openChat().catch(() => dispatch('openChat'));
+    // Ask the backend to raise `chat:open`; the pet window answers by
+    // docking the panel. Outside Tauri (plain browser tab) the parent's
+    // callback takes over instead.
+    openChat().catch(() => onopenchat?.());
   }
 
   function onContextMenu(e: MouseEvent) {

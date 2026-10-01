@@ -1,4 +1,5 @@
-<!-- ChatPanel: streaming conversation panel (lives in the main window) -->
+<!-- ChatPanel: streaming conversation panel. Hosted by the pet window's
+     panel slot (docked, follows the pet) or by the main window (floating). -->
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import { chatStore } from '$lib/stores/chat';
@@ -9,7 +10,9 @@
   import MessageList from './MessageList.svelte';
   import InputArea from './InputArea.svelte';
 
-  let { open = $bindable(false) } = $props();
+  // `docked` flattens the panel to fill its container: the pet window docks
+  // it beside the pet, where floating-corner positioning makes no sense.
+  let { open = $bindable(false), docked = false } = $props();
 
   const cleanups: (() => void)[] = [];
 
@@ -19,6 +22,7 @@
         if (chunk.delta) chatStore.appendDelta(chunk.delta);
         if (chunk.done) {
           chatStore.endStream(chunk.emotion);
+          chatStore.setLastError(null);
           petStore.playAnimation('idle');
         }
       }),
@@ -45,6 +49,7 @@
     chatStore.addUserMessage(text);
     chatStore.startStream();
     chatStore.setOffline(false);
+    chatStore.setLastError(null);
     petStore.playAnimation('talk');
 
     try {
@@ -54,6 +59,8 @@
       console.warn('send_message failed:', e);
       chatStore.endStream();
       chatStore.setOffline(true);
+      // Surface why nothing came back: offline badge alone hides the cause.
+      chatStore.setLastError(typeof e === 'string' ? e : String(e));
       petStore.playAnimation('idle');
     }
   }
@@ -69,7 +76,7 @@
 </script>
 
 {#if open}
-  <section class="chat-panel" aria-label="与 Echo 对话">
+  <section class="chat-panel" class:docked aria-label="与 Echo 对话">
     {#if systemStore.modelState === 'downloading' && systemStore.modelProgress}
       <div class="model-download">
         <span class="model-file">{systemStore.modelProgress.file}</span>
@@ -105,6 +112,10 @@
       <button class="close-btn" onclick={close} aria-label="关闭对话">×</button>
     </header>
 
+    {#if chatStore.lastError}
+      <p class="chat-error" role="alert">{chatStore.lastError}</p>
+    {/if}
+
     <MessageList messages={chatStore.messages} />
 
     <InputArea
@@ -132,6 +143,24 @@
     flex-direction: column;
     overflow: hidden;
     z-index: 9998;
+  }
+  /* Docked inside the pet window's panel slot: fill it edge to edge. */
+  .chat-panel.docked {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    max-width: none;
+    max-height: none;
+    border-radius: 0;
+    border-left: 1px solid var(--color-border);
+    box-shadow: none;
+  }
+  .chat-error {
+    padding: 6px 16px;
+    color: #e74c3c;
+    font-size: 12px;
+    background: rgba(231, 76, 60, 0.08);
+    overflow-wrap: anywhere;
   }
   .chat-header {
     display: flex;

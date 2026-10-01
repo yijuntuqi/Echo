@@ -91,6 +91,16 @@
       </form>
       {#if memoryStore.searchResults.length > 0}
         <MemoryGraph hits={memoryStore.searchResults} />
+        <ul class="hits">
+          {#each memoryStore.searchResults as hit, i (hit.memory_id + '-' + hit.memory_type)}
+            <li>
+              <span class="kind">{hit.memory_type === 'conversation' ? '对话' : '事件'}</span>
+              <span class="when">{new Date(hit.created_at).toLocaleDateString()}</span>
+              <span class="score">相关度 {Math.round((1 - hit.distance / 2) * 100)}%</span>
+              <span class="dot" style="background: {hit.memory_type === 'conversation' ? '#ff6b35' : '#3498db'}" aria-hidden="true">{i + 1}</span>
+            </li>
+          {/each}
+        </ul>
         <p class="hint">找到 {memoryStore.searchResults.length} 条相关记忆</p>
       {:else if query.trim() && !memoryStore.loading}
         <p class="hint">没有找到相关记忆</p>
@@ -134,4 +144,20 @@
   form button:disabled { opacity: 0.45; cursor: not-allowed; }
   .hint { text-align: center; color: var(--color-text-muted); font-size: 12px; margin-top: 8px; }
   .error { color: #e74c3c; font-size: 13px; margin-top: 8px; }
+  .hits { list-style: none; margin: 12px 0 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+  .hits li {
+    display: flex; gap: 10px; align-items: center;
+    padding: 8px 12px; font-size: 13px;
+    background: var(--color-bg-input);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+  }
+  .hits .kind { color: var(--color-accent); font-weight: 600; }
+  .hits .when { color: var(--color-text-muted); }
+  .hits .score { margin-left: auto; color: var(--color-text-muted); }
+  .hits .dot {
+    width: 18px; height: 18px; border-radius: 50%;
+    display: grid; place-items: center;
+    color: #fff; font-size: 10px; font-weight: 700;
+  }
 </style>

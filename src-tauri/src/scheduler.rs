@@ -5,29 +5,35 @@
 //! logged and the rest keep running: a failed greeting must not take the
 //! scheduler down with it.
 
+use tokio::sync::OnceCell;
 use tokio_cron_scheduler::{Job, JobScheduler};
 
 pub struct Scheduler {
-    sched: std::sync::OnceLock<JobScheduler>,
+    // Async OnceCell, not std's: `JobScheduler::new()` must be awaited inside
+    // the runtime. Wrapping it in `block_in_place` + `block_on` made the
+    // scheduler's internal start-acknowledgement channel die before the tick
+    // task could answer, so every `start()` failed with `TickError`.
+    sched: OnceCell<JobScheduler>,
 }
 
 impl Scheduler {
     pub fn new() -> Self {
-        Self { sched: std::sync::OnceLock::new() }
+        Self { sched: OnceCell::new() }
     }
 
-    fn get_or_init(&self) -> &JobScheduler {
-        self.sched.get_or_init(|| {
-            tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(JobScheduler::new())
-                    .unwrap_or_else(|e| panic!("failed to create job scheduler: {e}"))
+    async fn get_or_init(&self) -> &JobScheduler {
+        self.sched
+            .get_or_init(|| async {
+                JobScheduler::new()
+                    .await
+                    .expect("failed to create job scheduler")
             })
-        })
+            .await
     }
 
     /// Register the recurring jobs and start the scheduler.
     pub async fn start(&self, app: &tauri::AppHandle) -> Result<(), String> {
-        let sched = self.get_or_init();
+        let sched = self.get_or_init().await;
 
         // 08:00 local — birthday and anniversary greetings.
         self.add(sched, "0 0 8 * * *", "anniversary-check", || async {
@@ -57,8 +63,9 @@ impl Scheduler {
         })
         .await?;
 
-        // Sunday 10:00 — weekly backup.
-        self.add(sched, "0 0 10 * * 0", "weekly-backup", || async {
+        // Sunday 10:00 — weekly backup. The cron crate's weekday field takes
+        // 1-7 (1 = Sunday) or names; `0` is invalid and fails to parse.
+        self.add(sched, "0 0 10 * * Sun", "weekly-backup", || async {
             tracing::info!("running weekly backup");
         })
         .await?;
@@ -96,6 +103,25 @@ impl Scheduler {
 
 impl Default for Scheduler {
     fn default() -> Self {
-        Self { sched: std::sync::OnceLock::new() }
+        Self { sched: OnceCell::new() }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The production init path: `JobScheduler::new().await` directly in an
+    /// async context, then start. Guards both the TickError regression and
+    /// the exact cron expressions shipped in `start` (a typo there is only
+    /// a WARN at runtime).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn scheduler_starts_and_all_crons_parse() {
+        let sched = JobScheduler::new().await.expect("new scheduler");
+        for cron in ["0 0 8 * * *", "0 10 9 * * *", "0 0 22 * * *", "0 0 10 * * Sun"] {
+            Job::new_async(cron, move |_uuid, _l| Box::pin(async {}))
+                .unwrap_or_else(|e| panic!("cron {cron:?} failed to parse: {e}"));
+        }
+        sched.start().await.expect("scheduler should start without TickError");
     }
 }

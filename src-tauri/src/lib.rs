@@ -87,8 +87,21 @@ pub type PoolResult<T> = Result<T, DbError>;
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Load a gitignored local `.env` if present (secrets such as the shared
-    // API key stay out of the repository). No-op when the file is absent.
-    dotenvy::dotenv().ok();
+    // API key stay out of the repository). Line-by-line and tolerant: one
+    // unparsable line (e.g. GBK-encoded Chinese written by cmd.exe) must not
+    // poison the whole file — that silently cost us the shared key once.
+    match dotenvy::dotenv_iter() {
+        Ok(iter) => {
+            let mut loaded = 0usize;
+            for item in iter.flatten() {
+                let (key, value) = item;
+                std::env::set_var(key, value);
+                loaded += 1;
+            }
+            tracing::debug!(vars = loaded, "loaded local .env");
+        }
+        Err(e) => tracing::debug!(error = %e, "no .env loaded"),
+    }
 
     tracing_subscriber::registry()
         .with(fmt::layer().with_target(false).with_writer(std::io::stderr))

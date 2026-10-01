@@ -22,6 +22,8 @@ function createChatStore() {
   let inputValue = $state('');
   let quotaRemaining = $state<number | null>(null);
   let isOffline = $state(false);
+  /** Last send failure, shown once in the panel and cleared on next send. */
+  let lastError = $state<string | null>(null);
 
   const visibleMessages = $derived(messages);
   const canSend = $derived(!isStreaming && inputValue.trim().length > 0);
@@ -74,7 +76,8 @@ function createChatStore() {
   function clearInput(): void { inputValue = ''; }
   function setQuota(n: number): void { quotaRemaining = n; }
   function setOffline(v: boolean): void { isOffline = v; }
-  function reset(): void { messages = []; activeId = null; isStreaming = false; }
+  function setLastError(e: string | null): void { lastError = e; }
+  function reset(): void { messages = []; activeId = null; isStreaming = false; lastError = null; }
 
   if (browser) {
     try {
@@ -111,6 +114,7 @@ function createChatStore() {
     get canSend() { return canSend; },
     get quotaRemaining() { return quotaRemaining; },
     get isOffline() { return isOffline; },
+    get lastError() { return lastError; },
     addUserMessage,
     startStream,
     appendDelta,
@@ -119,6 +123,7 @@ function createChatStore() {
     clearInput,
     setQuota,
     setOffline,
+    setLastError,
     reset,
   };
 }
