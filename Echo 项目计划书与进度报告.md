@@ -2,7 +2,7 @@
 
 - **项目名称**：Echo — AI 桌面/移动端电子宠物
 - **代码仓库**：`git@github.com:yijuntuqi/Echo.git`
-- **当前分支**：`feature/chat-pipeline-tasks4-8`（Task 4-7 已提交；`main` 停在 `a1f2a60`，合并/推送待定）
+- **当前分支**：`feature/chat-pipeline-tasks4-8`（Task 4-7 + 交互修复/SenseNova 切换已提交至 `a9f9a70`；`main` 停在 `a1f2a60`，合并/推送待定）
 - **技术栈**：Tauri 2 + Rust + Svelte 5 + Vite 6 + SQLCipher + sqlx + Candle
 - **目标平台**：Windows 10/11 (EXE/MSI)、Android 8+ (APK/AAB)
 
@@ -59,7 +59,7 @@ Echo 是一只住在用户桌面/手机桌面上的 AI 电子宠物。它会：
 | 仪表盘 | ✅ | `EvolutionTree` / `MoodHeatmap` / `Timeline` / `MemoryGraph` | Canvas 可视化、语义搜索 |
 | 设置/页面 | ✅ | `SettingsPage` / `HomePage` / `DashboardPage` / `OnboardingPage` | Hash 路由、主题即时生效 |
 | 双窗口入口 | ✅ | `index.html` / `pet.html`、`main.ts` / `main-pet.ts` | Vite 多入口、Tauri 双窗口 |
-| Task 4: 智谱流式接入 | ✅ (commit `38a798f`) | `chat.rs` | 流式管道、Key 持久化（用户 Key 优先，共享 Key 兜底） |
+| Task 4: 智谱流式接入 | ✅ (commit `38a798f`) | `chat.rs` | 流式管道、Key 持久化（用户 Key 优先，共享 Key 兜底）；`a9f9a70` 起供应商切至 SenseNova（日常 `sensenova-6.8-flash-lite` / premium `glm-5.2`） |
 | Task 5: 模型自动下载 | ✅ (commit `1afa437`) | `embedding.rs` + 前端进度条 | `model:progress` / `model:done` 事件、失败降级 |
 
 ### 🚧 进行中 / 待完成
@@ -179,10 +179,15 @@ ECHO_FORCE_MODEL_DOWNLOAD=1 npx tauri dev
 | `PRAGMA key = x'...'` 语法错误 | 开库失败 `near "x'...'": syntax error` | SQLite pragma 值不收 blob 字面量；SQLCipher raw key 必须写成 `"x'...'"`（带双引号，见 db.rs `open_at`）。另：`kdf_iter = 100_000` 的下划线数字同样非法，已删，用 v4 默认 256000 |
 | rune 写在普通 `.ts` 里 | 白屏，Console 报 `rune_outside_svelte` | `$state` 等 rune 只能在 `.svelte.ts` / `.svelte` 文件用；`router.ts` 已改名 `router.svelte.ts`，且 tsconfig 需加精确 paths 映射 `$lib/router`（TS 不自动探测 `.svelte.ts`）。`npm run build` 不报这类错，只在运行时炸 |
 | 模块顶层 store 里用 `$effect` | 白屏，报 `effect_orphan` | `$effect` 只能在组件初始化或 `$effect.root()` 里调用；模块级 store（chat/pet/mood）的持久化 effect 全部包进 `$effect.root(() => { $effect(() => …) })`。同类错误会一个模块一个模块地连环爆（router 炸时挡住了 chat，chat 炸时挡住 pet/mood），排查时把整条 import 链都扫一遍 |
+| 宠物窗口设 `WS_EX_TRANSPARENT` | 宠物不能拖、点了没反应（所有鼠标事件穿透掉） | `build_pet_window` 初始样式只保留 `WS_EX_LAYERED \| WS_EX_TOPMOST`；点击穿透改为运行时由 `set_click_through` 按需开关（前后端默认 false）。注意 ChatPanel 曾在 `$effect` 里 `setClickThrough(!open)`，面板一关就把穿透钉回去——已删 |
+| 主窗口 X 直接销毁 webview | 托盘「设置」第二次点了没反应 | `WindowManager::init` 里对主窗口注册 `CloseRequested → prevent_close + hide()`。注意 Tauri 2 的 `AppHandle` 没有 `on_window_event`（只有 `App` 和单个窗口有），要在 `get_webview_window("main")` 上注册并 clone 窗口进闭包 |
+| SenseNova 推理模型思考字段 | 流式面板出现乱码思考文本 / 内容被截断 | SenseNova 思考片段在 `delta.reasoning`（智谱叫 `reasoning_content`）；解析器只转发 `delta.content` 天然兼容。`reasoning: {"exclude": true}` 参数被网关忽略，关不掉思考，首字延迟 ~3s 属正常 |
 
 ## 7. 下一步行动建议（交接给 Claude Code）
 
 ### 立即可做（阻塞最少）
+
+**当前卡点**：等用户本地验证 `a9f9a70`（宠物拖动/点击、托盘设置重开、首运只填 Key、SenseNova 对话出字）。
 
 **Task 8: 生日/周年/每日回顾内容生成** — 调度器任务位已就绪（`scheduler.rs` 中 anniversary-check / daily-recap 仍是日志占位）：
 
