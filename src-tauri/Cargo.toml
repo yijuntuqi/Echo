@@ -74,6 +74,9 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "serd
 uuid = { version = "1", features = ["v4", "serde"] }
 rand = "0.8"
 
+# Loads a gitignored local `.env` (e.g. ECHO_SHARED_KEY) at startup.
+dotenvy = "0.15"
+
 # Stores the generated database password in the OS credential vault
 # (Windows Credential Manager / macOS Keychain / libsecret). Preferred over
 # tauri-plugin-stronghold, which compiles libsodium from source.

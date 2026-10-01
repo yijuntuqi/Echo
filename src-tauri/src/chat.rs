@@ -13,10 +13,20 @@ use crate::db::Conversation;
 /// SenseNova's OpenAI-compatible endpoint.
 pub const DEFAULT_BASE_URL: &str = "https://token.sensenova.cn/v1";
 
-/// The official shared key, so unpaid installs still get the daily allowance
-/// (enforced locally by [`QuotaTracker`]). Users who bring their own key
-/// bypass the cap entirely.
-pub const SHARED_API_KEY: &str = "sk-RzGXlBuPBLXLf9CxDQs5EwCYxVCrS2hn";
+/// Environment variable carrying the official shared key. It can live in a
+/// gitignored local `.env` file (loaded by `dotenvy` in `lib.rs`) or be set
+/// in the process environment; it is never committed to the repository.
+pub const SHARED_API_KEY_ENV: &str = "ECHO_SHARED_KEY";
+
+/// The official shared key lets unpaid installs use the daily allowance
+/// (capped locally by [`QuotaTracker`]); users who bring their own key
+/// bypass the cap entirely. Empty means "bring your own key" is pending.
+pub fn shared_api_key() -> String {
+    std::env::var(SHARED_API_KEY_ENV)
+        .unwrap_or_default()
+        .trim()
+        .to_string()
+}
 
 #[derive(Debug, Error)]
 pub enum ChatError {
@@ -52,7 +62,7 @@ impl Default for ChatConfig {
             base_url: DEFAULT_BASE_URL.into(),
             // Overwritten from settings by `apply_key`; empty means "bring
             // your own key" is still pending.
-            api_key: SHARED_API_KEY.into(),
+            api_key: shared_api_key(),
             daily_model: "sensenova-6.8-flash-lite".into(),
             premium_model: "glm-5.2".into(),
             max_tokens: 2048,
@@ -501,7 +511,7 @@ pub async fn apply_key(engine: &ChatEngine, user_api_key: Option<&str>) {
             engine.quota.set_unlimited(true).await;
         }
         None => {
-            cfg.api_key = SHARED_API_KEY.to_string();
+            cfg.api_key = shared_api_key();
             engine.configure(cfg);
             engine.quota.set_unlimited(false).await;
         }
@@ -858,7 +868,7 @@ mod tests {
         assert_eq!(engine.quota.remaining(200).await, 200);
 
         apply_key(&engine, None).await;
-        assert_eq!(engine.config().api_key, SHARED_API_KEY);
+        assert_eq!(engine.config().api_key, shared_api_key());
         assert_eq!(engine.quota.remaining(200).await, 200);
     }
 

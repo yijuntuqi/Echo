@@ -1,0 +1,12 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Core runtime permissions for the main and pet windows. Without a capability, every JS-side window/event API call (listen, setPosition, startDragging…) is silently rejected by the Tauri ACL.",
+  "windows": ["main", "pet"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-start-dragging",
+    "core:window:allow-set-position",
+    "core:window:allow-outer-position"
+  ]
+}

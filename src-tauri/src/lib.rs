@@ -86,6 +86,10 @@ pub type PoolResult<T> = Result<T, DbError>;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Load a gitignored local `.env` if present (secrets such as the shared
+    // API key stay out of the repository). No-op when the file is absent.
+    dotenvy::dotenv().ok();
+
     tracing_subscriber::registry()
         .with(fmt::layer().with_target(false).with_writer(std::io::stderr))
         .with(

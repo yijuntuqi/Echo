@@ -46,6 +46,12 @@
 </div>
 
 <style>
-  /* The window itself is transparent; nothing here may paint a background. */
+  /* The window itself is transparent; nothing here may paint a background.
+     global.css paints `body` for the main window (Vite injects it after this
+     page's inline styles), so the pet window re-clears it here. */
+  :global(html),
+  :global(body) {
+    background: transparent !important;
+  }
   .pet-window { width: 100%; height: 100%; background: transparent; overflow: hidden; }
 </style>

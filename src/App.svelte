@@ -41,35 +41,48 @@
         if (!disposed) booting = false;
       }
 
-      // The pet window asks the main window to open the chat panel.
-      const unlisten = await on('chat:open', () => {
-        chatOpen = true;
-      });
-      if (disposed) unlisten();
-      else cleanups.push(unlisten);
+      // The pet window asks the main window to open the chat panel. Each
+      // listener registers independently: one failure must not break the rest.
+      try {
+        const unlisten = await on('chat:open', () => {
+          chatOpen = true;
+        });
+        if (disposed) unlisten();
+        else cleanups.push(unlisten);
+      } catch (e) {
+        console.warn('chat:open listener unavailable:', e);
+      }
 
       // A finished turn carries today's emotional read; keep the heatmap live.
-      const unlistenMood = await on('mood:updated', (m) => {
-        moodStore.upsert({ date: m.date, emotion: m.emotion, weight: m.weight, source: 'auto' });
-      });
-      if (disposed) unlistenMood();
-      else cleanups.push(unlistenMood);
+      try {
+        const unlistenMood = await on('mood:updated', (m) => {
+          moodStore.upsert({ date: m.date, emotion: m.emotion, weight: m.weight, source: 'auto' });
+        });
+        if (disposed) unlistenMood();
+        else cleanups.push(unlistenMood);
+      } catch (e) {
+        console.warn('mood:updated listener unavailable:', e);
+      }
 
       // The pet grew: mirror the transition into the dashboard store and
       // replay the evolve animation.
-      const unlistenEvolution = await on('evolution:triggered', (e) => {
-        evolutionStore.applyEvolution({
-          timestamp: new Date().toISOString(),
-          from_stage: e.from_stage,
-          to_stage: e.to_stage,
-          trigger_type: e.trigger,
-          personality_vector: e.personality,
-          score: e.score,
+      try {
+        const unlistenEvolution = await on('evolution:triggered', (e) => {
+          evolutionStore.applyEvolution({
+            timestamp: new Date().toISOString(),
+            from_stage: e.from_stage,
+            to_stage: e.to_stage,
+            trigger_type: e.trigger,
+            personality_vector: e.personality,
+            score: e.score,
+          });
+          petStore.setStage(e.to_stage);
         });
-        petStore.setStage(e.to_stage);
-      });
-      if (disposed) unlistenEvolution();
-      else cleanups.push(unlistenEvolution);
+        if (disposed) unlistenEvolution();
+        else cleanups.push(unlistenEvolution);
+      } catch (e) {
+        console.warn('evolution:triggered listener unavailable:', e);
+      }
     })();
 
     return () => {

@@ -1,7 +1,7 @@
 <!-- PetAvatar: SVG state machine + drag + click for the pet window -->
 <script lang="ts">
   import { createEventDispatcher } from 'svelte';
-  import { getCurrentWindow, PhysicalPosition } from '@tauri-apps/api/window';
+  import { getCurrentWindow } from '@tauri-apps/api/window';
   import { openChat } from '$lib/api/commands';
   import { petStore } from '$lib/stores/pet';
 
@@ -37,55 +37,53 @@
   let animClass = $derived(`anim-${petStore.animation}`);
 
   let dragging = $state(false);
-  let dragOrigin = { x: 0, y: 0 };
   // Where this press began; movement beyond DRAG_THRESHOLD px reclassifies
   // the gesture from click to drag and suppresses the trailing click event.
   let pressOrigin = { x: 0, y: 0 };
   const DRAG_THRESHOLD = 4;
-  let moved = $state(false);
+  // Set once the OS takes over the gesture via startDragging(); the trailing
+  // click consumes it so dropping the pet doesn't open the chat panel.
+  let osDrag = $state(false);
 
   function startDrag(e: MouseEvent) {
     if (e.button !== 0 || petStore.clickThrough) return;
     dragging = true;
-    moved = false;
-    dragOrigin = { x: e.screenX, y: e.screenY };
+    osDrag = false;
     pressOrigin = { x: e.screenX, y: e.screenY };
-    petStore.playAnimation('walk');
   }
 
-  async function onDrag(e: MouseEvent) {
-    if (!dragging) return;
+  function onDrag(e: MouseEvent) {
+    if (!dragging || osDrag) return;
     if (
-      !moved &&
       Math.hypot(e.screenX - pressOrigin.x, e.screenY - pressOrigin.y) < DRAG_THRESHOLD
     ) {
       return;
     }
-    moved = true;
-    const dx = e.screenX - dragOrigin.x;
-    const dy = e.screenY - dragOrigin.y;
-    if (dx === 0 && dy === 0) return;
-    dragOrigin = { x: e.screenX, y: e.screenY };
-    try {
-      const win = getCurrentWindow();
-      const pos = await win.outerPosition();
-      await win.setPosition(new PhysicalPosition(pos.x + dx, pos.y + dy));
-    } catch {
-      // Not running inside Tauri (e.g. `vite dev` in a plain browser tab).
-    }
+    osDrag = true;
+    petStore.playAnimation('walk');
+    // Hand the gesture to the OS: it moves the native window itself, which
+    // stays smooth at any DPI scale (a JS move loop would need physical-pixel
+    // conversion and stutters on async IPC).
+    getCurrentWindow()
+      .startDragging()
+      .catch(() => {
+        // Not running inside Tauri (e.g. `vite dev` in a plain browser tab).
+        osDrag = false;
+      });
   }
 
   function endDrag() {
     if (!dragging) return;
     dragging = false;
-    petStore.playAnimation('idle');
+    // During a native drag the webview may never see the mouseup, and osDrag
+    // must survive until the trailing click consumes it — only clear the
+    // walk animation for plain presses.
+    if (!osDrag) petStore.playAnimation('idle');
   }
 
   async function onClick() {
-    // A real drag ends with a click event on the pet; drop it instead of
-    // opening chat every time the pet is repositioned.
-    if (moved) {
-      moved = false;
+    if (osDrag) {
+      osDrag = false;
       return;
     }
     petStore.playAnimation('react');
