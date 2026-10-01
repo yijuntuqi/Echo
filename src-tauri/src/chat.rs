@@ -1,4 +1,4 @@
-//! Zhipu BigModel client: streaming completions with retries and a quota cap.
+//! SenseNova client: streaming completions with retries and a quota cap.
 //!
 //! Replies are pushed to the frontend over the `chat:stream` event rather than
 //! returned from the command, so the command resolves immediately and the UI
@@ -10,13 +10,13 @@ use tauri::Emitter;
 
 use crate::db::Conversation;
 
-/// Zhipu's OpenAI-compatible endpoint.
-pub const DEFAULT_BASE_URL: &str = "https://open.bigmodel.cn/api/paas/v4";
+/// SenseNova's OpenAI-compatible endpoint.
+pub const DEFAULT_BASE_URL: &str = "https://token.sensenova.cn/v1";
 
-/// The official shared key would live here so unpaid installs still get the
-/// daily allowance. Nothing is committed to this public repository; an empty
-/// value means every install must bring its own key.
-pub const SHARED_API_KEY: &str = "";
+/// The official shared key, so unpaid installs still get the daily allowance
+/// (enforced locally by [`QuotaTracker`]). Users who bring their own key
+/// bypass the cap entirely.
+pub const SHARED_API_KEY: &str = "sk-RzGXlBuPBLXLf9CxDQs5EwCYxVCrS2hn";
 
 #[derive(Debug, Error)]
 pub enum ChatError {
@@ -53,7 +53,7 @@ impl Default for ChatConfig {
             // Overwritten from settings by `apply_key`; empty means "bring
             // your own key" is still pending.
             api_key: SHARED_API_KEY.into(),
-            daily_model: "glm-5.3-flash".into(),
+            daily_model: "sensenova-6.8-flash-lite".into(),
             premium_model: "glm-5.2".into(),
             max_tokens: 2048,
             temperature: 0.8,
@@ -200,9 +200,10 @@ impl ChatEngine {
     /// Stream a completion from the configured endpoint, calling `on_delta`
     /// with each visible content fragment.
     ///
-    /// Reasoning models (the glm-4.5 family onward) stream a
-    /// `reasoning_content` field before the answer; those fragments are
-    /// dropped here so the panel only ever sees the reply itself.
+    /// Reasoning models stream their thinking in a separate delta field
+    /// (`reasoning` on SenseNova, `reasoning_content` elsewhere) before the
+    /// answer; those fragments are dropped here so the panel only ever sees
+    /// the reply itself.
     ///
     /// Server errors (5xx) and network failures retry with exponential
     /// backoff; client errors (4xx) fail immediately — a bad key will not

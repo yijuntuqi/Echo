@@ -4,7 +4,7 @@
   import { chatStore } from '$lib/stores/chat';
   import { petStore } from '$lib/stores/pet';
   import { systemStore } from '$lib/stores/system';
-  import { sendMessage, setClickThrough } from '$lib/api/commands';
+  import { sendMessage } from '$lib/api/commands';
   import { on } from '$lib/api/events';
   import MessageList from './MessageList.svelte';
   import InputArea from './InputArea.svelte';
@@ -38,11 +38,6 @@
   });
 
   onDestroy(() => cleanups.forEach((fn) => fn()));
-
-  // While the chat is open the pet must not swallow clicks meant for the panel.
-  $effect(() => {
-    setClickThrough(!open).catch(() => {});
-  });
 
   async function submit(text: string) {
     if (!text.trim() || chatStore.isStreaming) return;

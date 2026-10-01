@@ -26,10 +26,25 @@ impl WindowManager {
         let tray = build_tray(app)?;
         register_hotkey(app)?;
 
+        // A tray app must not lose its windows to the X button: closing the
+        // main window hides it instead, so the tray's "设置" entry can still
+        // surface it later (recreating a destroyed webview is not possible).
+        if let Some(main) = app.get_webview_window(MAIN_WINDOW) {
+            let window_for_close = main.clone();
+            main.on_window_event(move |event| {
+                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                    api.prevent_close();
+                    let _ = window_for_close.hide();
+                }
+            });
+        }
+
         Ok(Self {
             pet_window: Some(pet_window),
             tray: Some(tray),
-            click_through: Mutex::new(true),
+            // The pet starts interactive; click-through is opt-in via the
+            // `set_click_through` command.
+            click_through: Mutex::new(false),
         })
     }
 
@@ -94,21 +109,21 @@ fn build_pet_window(app: &AppHandle) -> Result<WebviewWindow, Box<dyn std::error
         use windows::Win32::Foundation::HWND;
         use windows::Win32::UI::WindowsAndMessaging::{
             GetWindowLongPtrW, SetWindowLongPtrW, GWL_EXSTYLE, WS_EX_LAYERED, WS_EX_TOPMOST,
-            WS_EX_TRANSPARENT,
         };
         if let Ok(raw) = win.hwnd() {
             let hwnd = HWND(raw.0 as *mut core::ffi::c_void);
             // SAFETY: called on the UI thread with a live HWND owned by this window.
             // WS_EX_LAYERED is required for per-pixel alpha on a transparent window.
+            // WS_EX_TRANSPARENT is deliberately NOT set here: it makes every
+            // mouse event fall through the pet, killing drag and click. The
+            // initial style is interactive; `set_click_through` toggles the
+            // flag at runtime when the user asks for pass-through.
             unsafe {
                 let current = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
                 SetWindowLongPtrW(
                     hwnd,
                     GWL_EXSTYLE,
-                    current
-                        | WS_EX_LAYERED.0 as isize
-                        | WS_EX_TRANSPARENT.0 as isize
-                        | WS_EX_TOPMOST.0 as isize,
+                    current | WS_EX_LAYERED.0 as isize | WS_EX_TOPMOST.0 as isize,
                 );
             }
         }

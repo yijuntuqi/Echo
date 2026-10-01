@@ -10,7 +10,9 @@ function createPetStore() {
     let animation = $state<PetAnimationState>('idle');
     let position = $state<Vec2>({ x: 100, y: 100 });
     let isVisible = $state(true);
-    let clickThrough = $state(true);
+    // The pet starts interactive; click-through is opt-in (mirrors the
+    // backend's WindowManager default).
+    let clickThrough = $state(false);
     let personality = $state<Record<string, number>>({});
     let lastInteraction = $state<Date | null>(null);
     

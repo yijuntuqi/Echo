@@ -38,16 +38,30 @@
 
   let dragging = $state(false);
   let dragOrigin = { x: 0, y: 0 };
+  // Where this press began; movement beyond DRAG_THRESHOLD px reclassifies
+  // the gesture from click to drag and suppresses the trailing click event.
+  let pressOrigin = { x: 0, y: 0 };
+  const DRAG_THRESHOLD = 4;
+  let moved = $state(false);
 
   function startDrag(e: MouseEvent) {
-    if (petStore.clickThrough) return;
+    if (e.button !== 0 || petStore.clickThrough) return;
     dragging = true;
+    moved = false;
     dragOrigin = { x: e.screenX, y: e.screenY };
+    pressOrigin = { x: e.screenX, y: e.screenY };
     petStore.playAnimation('walk');
   }
 
   async function onDrag(e: MouseEvent) {
     if (!dragging) return;
+    if (
+      !moved &&
+      Math.hypot(e.screenX - pressOrigin.x, e.screenY - pressOrigin.y) < DRAG_THRESHOLD
+    ) {
+      return;
+    }
+    moved = true;
     const dx = e.screenX - dragOrigin.x;
     const dy = e.screenY - dragOrigin.y;
     if (dx === 0 && dy === 0) return;
@@ -68,6 +82,12 @@
   }
 
   async function onClick() {
+    // A real drag ends with a click event on the pet; drop it instead of
+    // opening chat every time the pet is repositioned.
+    if (moved) {
+      moved = false;
+      return;
+    }
     petStore.playAnimation('react');
     petStore.touch();
     // The chat panel lives in the main window; ask the backend to surface it.
