@@ -17,7 +17,11 @@ function createMoodStore() {
     if (browser) {
         const saved = localStorage.getItem('mood:entries');
         if (saved) { try { entries = JSON.parse(saved); } catch {} }
-        $effect(() => { localStorage.setItem('mood:entries', JSON.stringify(entries)); });
+        // Module-scope store: no component owns effects here, hence the root
+        // (see chat.svelte.ts for the longer note).
+        $effect.root(() => {
+            $effect(() => { localStorage.setItem('mood:entries', JSON.stringify(entries)); });
+        });
     }
     
     return { get entries() { return entries; }, upsert, getRange };

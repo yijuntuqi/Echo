@@ -87,13 +87,19 @@ function createChatStore() {
       // Corrupt cache: start clean rather than blocking the app.
     }
 
-    $effect(() => {
-      const snapshot = messages.slice(-MAX_CACHED).map((m) => ({ ...m, timestamp: m.timestamp.toISOString() }));
-      try {
-        localStorage.setItem(HISTORY_KEY, JSON.stringify(snapshot));
-      } catch {
-        // Quota exceeded: drop the cache, keep the in-memory session.
-      }
+    // Module-scope store: there is no component to own this effect, so it
+    // needs an explicit root ($effect alone throws effect_orphan here). The
+    // store lives as long as the app does, so the root's stop function is
+    // never called.
+    $effect.root(() => {
+      $effect(() => {
+        const snapshot = messages.slice(-MAX_CACHED).map((m) => ({ ...m, timestamp: m.timestamp.toISOString() }));
+        try {
+          localStorage.setItem(HISTORY_KEY, JSON.stringify(snapshot));
+        } catch {
+          // Quota exceeded: drop the cache, keep the in-memory session.
+        }
+      });
     });
   }
 

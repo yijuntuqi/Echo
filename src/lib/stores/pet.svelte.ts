@@ -45,7 +45,11 @@ function createPetStore() {
     if (browser) {
         const saved = localStorage.getItem('pet:position');
         if (saved) { try { position = JSON.parse(saved); } catch {} }
-        $effect(() => { localStorage.setItem('pet:position', JSON.stringify(position)); });
+        // Module-scope store: no component owns effects here, hence the root
+        // (see chat.svelte.ts for the longer note).
+        $effect.root(() => {
+            $effect(() => { localStorage.setItem('pet:position', JSON.stringify(position)); });
+        });
     }
     
     return {
