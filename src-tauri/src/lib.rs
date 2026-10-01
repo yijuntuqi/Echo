@@ -173,6 +173,7 @@ pub fn run() {
             window::get_pet_position,
             window::set_pet_position,
             window::open_chat,
+            window::set_pet_window_shape,
             // chat
             chat::send_message,
             chat::get_history,

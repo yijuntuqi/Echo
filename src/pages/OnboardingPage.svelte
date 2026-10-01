@@ -16,6 +16,7 @@
   let nickname = $state('');
   let birthday = $state('');
   let userApiKey = $state('');
+  let userBaseUrl = $state('');
   let theme = $state<'light' | 'dark' | 'auto'>('auto');
   let notifications = $state(true);
   let autoStart = $state(true);
@@ -44,6 +45,7 @@
           notifications,
           auto_start: autoStart,
           user_api_key: userApiKey || undefined,
+          user_base_url: userBaseUrl.trim() || undefined,
           model_preference: 'auto',
         },
       );
@@ -86,6 +88,8 @@
     <h2>AI 设置（可选）</h2>
     <p class="lead">留空则使用内置共享额度（每日 200 次）。填入自己的 Key 可解除限制。</p>
     <TextField type="password" bind:value={userApiKey} placeholder="sk-..." />
+    <TextField bind:value={userBaseUrl} placeholder="接口地址（可选，默认内置）" />
+    <p class="tip">接口地址需为 OpenAI 兼容格式（如 https://api.openai.com/v1），仅搭配自己的 Key 生效。</p>
   {/if}
 
   {#if error}<p class="error" role="alert">{error}</p>{/if}
@@ -135,5 +139,6 @@
   }
 
   .error { font-size: 13px; color: #e74c3c; margin: 0; }
+  .tip { font-size: 12px; color: var(--color-text-muted); margin: 0; }
   .actions { display: flex; justify-content: space-between; margin-top: 8px; }
 </style>

@@ -86,7 +86,15 @@
       bind:value={settingsStore.settings.user_api_key}
       placeholder="sk-..."
     />
-    <p class="hint">填入后使用你自己的额度，不受每日 200 次限制；留空则使用内置共享额度。</p>
+    <TextField
+      label="接口地址（可选）"
+      bind:value={settingsStore.settings.user_base_url}
+      placeholder="https://api.openai.com/v1"
+    />
+    <p class="hint">
+      填入 Key 后使用你自己的额度，不受每日 200 次限制；留空则使用内置共享额度。
+      接口地址需为 OpenAI 兼容格式，仅搭配自己的 Key 生效，留空使用内置服务商。
+    </p>
   </section>
 
   <section class="card">

@@ -7,7 +7,7 @@
   import PetAvatar from '$lib/components/pet/PetAvatar.svelte';
   import ChatPanel from '$lib/components/chat/ChatPanel.svelte';
   import { petStore } from '$lib/stores/pet';
-  import { getPetPosition, showPetOverlay } from '$lib/api/commands';
+  import { getPetPosition, showPetOverlay, setPetWindowShape } from '$lib/api/commands';
   import { on } from '$lib/api/events';
 
   // Layout constants in CSS pixels. The pet keeps its 200x200 square; the
@@ -128,6 +128,13 @@
 
       if (x !== pos.x || y !== pos.y) await win.setPosition(new PhysicalPosition(x, y));
       await win.setSize(new PhysicalSize(w, h));
+      // The grown window is mostly empty transparency: without a hit-test
+      // region that invisible rectangle would swallow clicks meant for
+      // windows underneath (e.g. the main window's navigation).
+      await setPetWindowShape([
+        [Math.round(petX * scale), Math.round(petY * scale), Math.round(PET_EDGE * scale), Math.round(PET_EDGE * scale)],
+        [Math.round(panelX * scale), 0, Math.round(PANEL_W * scale), Math.round(WINDOW_H * scale)],
+      ]).catch(() => {});
       expanded = true;
       panelOpen = true;
     } catch {
@@ -154,6 +161,10 @@
         );
         originBeforeExpand = null;
       }
+      // Lift the region restriction: the 200x200 square is small enough that
+      // its corners blocking a sliver of background is acceptable, and the
+      // pet itself stays fully interactive.
+      await setPetWindowShape(null).catch(() => {});
     } catch {
       /* ignore */
     }

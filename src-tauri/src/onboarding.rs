@@ -157,21 +157,27 @@ pub async fn open_existing(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// Push the stored `user_api_key` (if any) into the chat engine.
+/// Push the stored `user_api_key` / `user_base_url` (if any) into the chat
+/// engine.
 ///
 /// Best-effort: a malformed settings blob must not block startup.
 pub async fn apply_chat_key_from_db(pool: &crate::db::DbPool) {
-    let key: Option<String> = sqlx::query("SELECT settings_json FROM profiles WHERE id = 1")
-        .fetch_optional(pool)
-        .await
-        .ok()
-        .flatten()
-        .and_then(|row| {
-            use sqlx::Row;
-            let json: String = row.get("settings_json");
-            serde_json::from_str::<Settings>(&json)
-                .ok()
-                .and_then(|s| s.user_api_key)
-        });
-    crate::chat::apply_key(&crate::state().chat, key.as_deref()).await;
+    let profile: Option<(String, Option<String>)> =
+        sqlx::query("SELECT settings_json FROM profiles WHERE id = 1")
+            .fetch_optional(pool)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|row| {
+                use sqlx::Row;
+                let json: String = row.get("settings_json");
+                serde_json::from_str::<Settings>(&json)
+                    .ok()
+                    .map(|s| (s.user_api_key.unwrap_or_default(), s.user_base_url))
+            });
+    let (key, base_url) = match profile {
+        Some((k, url)) => (Some(k), url),
+        None => (None, None),
+    };
+    crate::chat::apply_key(&crate::state().chat, key.as_deref(), base_url.as_deref()).await;
 }

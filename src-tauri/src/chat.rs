@@ -477,10 +477,11 @@ pub(crate) async fn persist_turn(
         None => (None, None, None),
     };
 
-    if let Err(e) = sqlx::query(
+    let conv_id: Option<i64> = match sqlx::query_scalar::<_, i64>(
         "INSERT INTO conversations
              (user_message, ai_reply, emotion, emotion_weight, topics, tokens_used, model_used)
-         VALUES (?, ?, ?, ?, ?, ?, ?)",
+         VALUES (?, ?, ?, ?, ?, ?, ?)
+         RETURNING id",
     )
     .bind(user_message)
     .bind(&outcome.reply)
@@ -489,10 +490,25 @@ pub(crate) async fn persist_turn(
     .bind(&topics)
     .bind(tokens)
     .bind(&outcome.model)
-    .execute(pool)
+    .fetch_one(pool)
     .await
     {
-        tracing::warn!("conversation insert failed: {e}");
+        Ok(id) => Some(id),
+        Err(e) => {
+            tracing::warn!("conversation insert failed: {e}");
+            None
+        }
+    };
+
+    // Index the turn for semantic search. Best-effort: a not-yet-ready or
+    // failed embedding model only means this turn stays unindexed for now.
+    if let (Some(id), Some(embedding)) = (conv_id, crate::state().embedding.get()) {
+        let text: String =
+            format!("{user_message} {}", outcome.reply).chars().take(600).collect();
+        match embedding.encode(&text) {
+            Ok(vec) => crate::vector::store_memory(pool, &vec, id, "conversation").await,
+            Err(e) => tracing::debug!(error = %e, "turn embedding skipped"),
+        }
     }
 
     let read = read?;
@@ -524,21 +540,30 @@ pub struct MoodUpdated {
 /// Install `user_api_key` as the active key, or fall back to the shared one.
 ///
 /// A user's own key lifts the shared daily cap entirely; the shared key (when
-/// an official one exists) is capped by `daily_limit`.
-pub async fn apply_key(engine: &ChatEngine, user_api_key: Option<&str>) {
+/// an official one exists) is capped by `daily_limit`. `user_base_url` pairs
+/// with the key for third-party OpenAI-compatible endpoints (OpenRouter, a
+/// local vLLM…); empty means the built-in default endpoint.
+pub async fn apply_key(engine: &ChatEngine, user_api_key: Option<&str>, user_base_url: Option<&str>) {
     let mut cfg = engine.config();
+    let using_user_key = user_api_key.map(str::trim).filter(|k| !k.is_empty()).is_some();
     match user_api_key.map(str::trim).filter(|k| !k.is_empty()) {
         Some(key) => {
             cfg.api_key = key.to_string();
-            engine.configure(cfg);
             engine.quota.set_unlimited(true).await;
         }
         None => {
             cfg.api_key = shared_api_key();
-            engine.configure(cfg);
             engine.quota.set_unlimited(false).await;
         }
     }
+    // The endpoint only follows the user's key: a custom URL without the
+    // matching key would send the shared key to a foreign host.
+    if let Some(url) = user_base_url.map(str::trim).filter(|u| !u.is_empty() && using_user_key) {
+        cfg.base_url = url.trim_end_matches('/').to_string();
+    } else if !using_user_key {
+        cfg.base_url = DEFAULT_BASE_URL.into();
+    }
+    engine.configure(cfg);
 }
 
 fn pool() -> Result<&'static crate::db::DbPool, String> {
@@ -927,12 +952,18 @@ mod tests {
         };
         let engine = ChatEngine::new(cfg);
 
-        apply_key(&engine, Some(" user-key ")).await;
+        apply_key(&engine, Some(" user-key "), None).await;
         assert_eq!(engine.config().api_key, "user-key");
         assert_eq!(engine.quota.remaining(200).await, 200);
 
-        apply_key(&engine, None).await;
+        // A custom endpoint rides along with the user key…
+        apply_key(&engine, Some("user-key"), Some("http://127.0.0.1:9/v1/")).await;
+        assert_eq!(engine.config().base_url, "http://127.0.0.1:9/v1");
+
+        // …but is dropped again once the shared key takes over.
+        apply_key(&engine, None, Some("http://127.0.0.1:9/v1")).await;
         assert_eq!(engine.config().api_key, shared_api_key());
+        assert_eq!(engine.config().base_url, DEFAULT_BASE_URL);
         assert_eq!(engine.quota.remaining(200).await, 200);
     }
 

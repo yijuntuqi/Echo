@@ -35,6 +35,8 @@ export interface Settings {
   notifications: boolean;
   auto_start: boolean;
   user_api_key?: string;
+  /** OpenAI-compatible endpoint paired with a user key; empty = default. */
+  user_base_url?: string;
   model_preference: 'daily' | 'premium' | 'auto';
 }
 
@@ -70,7 +72,10 @@ export interface DateRange {
 export interface VectorHit {
   memory_id: number;
   memory_type: 'conversation' | 'event';
+  /** RFC3339 (conversations) or YYYY-MM-DD (events). */
   created_at: string;
+  /** Short text excerpt of the memory, for the results list. */
+  content: string;
   distance: number; // cosine distance, 0 (identical) .. 2 (opposite)
 }
 

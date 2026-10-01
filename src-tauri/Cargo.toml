@@ -91,10 +91,12 @@ tracing-subscriber = { version = "0.3", default-features = false, features = [
 ] }
 
 [target.'cfg(windows)'.dependencies]
-# WS_EX_LAYERED / WS_EX_TRANSPARENT for the click-through pet window.
+# WS_EX_LAYERED / WS_EX_TRANSPARENT for the click-through pet window; GDI
+# regions so the expanded window only hits where the pet and panel actually are.
 windows = { version = "0.58", features = [
   "Win32_Foundation",
   "Win32_UI_WindowsAndMessaging",
+  "Win32_Graphics_Gdi",
 ] }
 
 [features]

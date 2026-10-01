@@ -26,6 +26,13 @@ export const setPetPosition = (x: number, y: number): Promise<void> =>
   invoke('set_pet_position', { x, y });
 /** Surface the main window and ask it to open the chat panel. */
 export const openChat = (): Promise<void> => invoke('open_chat');
+/**
+ * Restrict where the transparent pet window accepts mouse input: physical-px
+ * `[x, y, w, h]` rects relative to the window; input outside their union falls
+ * through. `null` lifts the restriction (whole window hit-testable).
+ */
+export const setPetWindowShape = (rects: [number, number, number, number][] | null): Promise<void> =>
+  invoke('set_pet_window_shape', { region: rects === null ? null : { rects } });
 
 // --- chat ------------------------------------------------------------------
 /** Fire-and-forget: replies stream back over the `chat:stream` event. */

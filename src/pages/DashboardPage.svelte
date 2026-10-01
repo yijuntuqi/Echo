@@ -28,6 +28,31 @@
     }
   }
 
+  /** SQLite timestamps can be "YYYY-MM-DD HH:MM:SS" or RFC3339 or a bare
+   * date — only the first parses reliably in every JS engine. */
+  function prettyDate(raw: string): string {
+    if (!raw) return '';
+    const d = new Date(raw.includes(' ') && !raw.includes('T') ? raw.replace(' ', 'T') : raw);
+    if (Number.isNaN(d.getTime())) return raw;
+    const sameYear = d.getFullYear() === new Date().getFullYear();
+    return d.toLocaleDateString('zh-CN', {
+      month: 'short',
+      day: 'numeric',
+      ...(sameYear ? {} : { year: 'numeric' }),
+    });
+  }
+
+  /** Map the 0..2 cosine distance onto a friendlier 0..100 percentage. */
+  function relevance(distance: number): number {
+    return Math.round(Math.max(0, Math.min(1, 1 - distance / 2)) * 100);
+  }
+
+  /** Keep results scannable: one line, the user's words first. */
+  function snippet(text: string): string {
+    const clean = text.replace(/\s+/g, ' ').trim();
+    return clean.length > 64 ? clean.slice(0, 64) + '…' : clean;
+  }
+
   onMount(async () => {
     try {
       const [evo, timeline] = await Promise.all([
@@ -90,14 +115,16 @@
         </button>
       </form>
       {#if memoryStore.searchResults.length > 0}
-        <MemoryGraph hits={memoryStore.searchResults} />
+        {#if memoryStore.searchResults.length > 1}
+          <MemoryGraph hits={memoryStore.searchResults} />
+        {/if}
         <ul class="hits">
-          {#each memoryStore.searchResults as hit, i (hit.memory_id + '-' + hit.memory_type)}
+          {#each memoryStore.searchResults as hit (hit.memory_id + '-' + hit.memory_type)}
             <li>
               <span class="kind">{hit.memory_type === 'conversation' ? '对话' : '事件'}</span>
-              <span class="when">{new Date(hit.created_at).toLocaleDateString()}</span>
-              <span class="score">相关度 {Math.round((1 - hit.distance / 2) * 100)}%</span>
-              <span class="dot" style="background: {hit.memory_type === 'conversation' ? '#ff6b35' : '#3498db'}" aria-hidden="true">{i + 1}</span>
+              <span class="when">{prettyDate(hit.created_at)}</span>
+              <span class="score">相关度 {relevance(hit.distance)}%</span>
+              <p class="snippet">{snippet(hit.content)}</p>
             </li>
           {/each}
         </ul>
@@ -146,18 +173,21 @@
   .error { color: #e74c3c; font-size: 13px; margin-top: 8px; }
   .hits { list-style: none; margin: 12px 0 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
   .hits li {
-    display: flex; gap: 10px; align-items: center;
-    padding: 8px 12px; font-size: 13px;
+    display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap;
+    padding: 10px 12px; font-size: 13px;
     background: var(--color-bg-input);
     border: 1px solid var(--color-border);
     border-radius: var(--radius-sm);
   }
-  .hits .kind { color: var(--color-accent); font-weight: 600; }
-  .hits .when { color: var(--color-text-muted); }
-  .hits .score { margin-left: auto; color: var(--color-text-muted); }
-  .hits .dot {
-    width: 18px; height: 18px; border-radius: 50%;
-    display: grid; place-items: center;
-    color: #fff; font-size: 10px; font-weight: 700;
+  .hits .kind { color: var(--color-accent); font-weight: 600; flex-shrink: 0; }
+  .hits .when { color: var(--color-text-muted); flex-shrink: 0; }
+  .hits .score { margin-left: auto; color: var(--color-text-muted); flex-shrink: 0; }
+  .hits .snippet {
+    flex-basis: 100%;
+    margin: 0;
+    color: var(--color-text);
+    font-size: 12.5px;
+    line-height: 1.5;
+    overflow-wrap: anywhere;
   }
 </style>

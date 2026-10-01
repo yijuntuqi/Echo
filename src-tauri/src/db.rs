@@ -209,6 +209,10 @@ pub struct Settings {
     pub notifications: bool,
     pub auto_start: bool,
     pub user_api_key: Option<String>,
+    /// OpenAI-compatible endpoint to pair with a user key (e.g. an
+    /// OpenRouter or local vLLM URL). Empty = the built-in default.
+    #[serde(default)]
+    pub user_base_url: Option<String>,
     pub model_preference: String,
 }
 
@@ -221,6 +225,7 @@ impl Default for Settings {
             notifications: true,
             auto_start: true,
             user_api_key: None,
+            user_base_url: None,
             model_preference: "auto".into(),
         }
     }
@@ -284,6 +289,11 @@ pub struct VectorHit {
     pub memory_id: i64,
     pub memory_type: String,
     pub distance: f32,
+    /// When the memory happened: conversations carry their RFC3339 timestamp,
+    /// events their local date.
+    pub created_at: String,
+    /// A short text excerpt of the memory, for display in search results.
+    pub content: String,
 }
 
 pub fn parse_date(s: &str) -> Option<NaiveDate> {

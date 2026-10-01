@@ -136,13 +136,14 @@ fn build_pet_window(app: &AppHandle) -> Result<WebviewWindow, Box<dyn std::error
 fn build_tray(app: &AppHandle) -> Result<tauri::tray::TrayIcon, Box<dyn std::error::Error>> {
     let show = MenuItemBuilder::with_id("show", "显示宠物").build(app)?;
     let hide = MenuItemBuilder::with_id("hide", "隐藏宠物").build(app)?;
+    let main_window = MenuItemBuilder::with_id("main_window", "主窗口").build(app)?;
     let settings = MenuItemBuilder::with_id("settings", "设置").build(app)?;
     let quit = MenuItemBuilder::with_id("quit", "退出").build(app)?;
     let sep1 = PredefinedMenuItem::separator(app)?;
     let sep2 = PredefinedMenuItem::separator(app)?;
 
     let menu = MenuBuilder::new(app)
-        .items(&[&show, &hide, &sep1, &settings, &sep2, &quit])
+        .items(&[&show, &hide, &sep1, &main_window, &settings, &sep2, &quit])
         .build()?;
 
     let icon = app
@@ -177,7 +178,7 @@ fn handle_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
     match event.id().as_ref() {
         "show" => show_pet_window(app),
         "hide" => hide_pet_window(app),
-        "settings" => show_main_window(app),
+        "main_window" | "settings" => show_main_window(app),
         // "quit" is distinct from "hide": it tears the process down.
         "quit" => app.exit(0),
         _ => {}
@@ -198,13 +199,16 @@ fn register_hotkey(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
 
 fn toggle_pet_window(app: &AppHandle) {
     let Some(win) = app.get_webview_window(PET_WINDOW) else {
+        tracing::warn!("tray toggle: pet window not found");
         return;
     };
     match win.is_visible() {
         Ok(true) => {
+            tracing::info!("tray toggle: hiding pet window");
             let _ = win.hide();
         }
-        _ => {
+        state => {
+            tracing::info!(?state, "tray toggle: showing pet window");
             let _ = win.show();
             let _ = win.set_always_on_top(true);
         }
@@ -284,4 +288,75 @@ pub fn set_pet_position(app: AppHandle, x: f64, y: f64) -> Result<(), String> {
 pub fn open_chat(app: AppHandle) -> Result<(), String> {
     app.emit("chat:open", ())
         .map_err(|e| e.to_string())
+}
+
+/// Hit-test region for the pet window, in physical px relative to the window.
+#[derive(serde::Deserialize)]
+pub struct WindowRegion {
+    /// `[x, y, width, height]` rectangles; mouse input outside the union of
+    /// these falls through to whatever is beneath the window.
+    pub rects: Vec<[i32; 4]>,
+}
+
+/// Restrict where the (transparent) pet window accepts mouse input.
+///
+/// While the chat panel is docked the window grows to ~592x560, almost all of
+/// it empty transparency — without a region that invisible rectangle blocks
+/// clicks aimed at windows underneath (e.g. the main window's navigation).
+/// `None` removes the restriction (the collapsed 200x200 square is small).
+#[tauri::command]
+pub fn set_pet_window_shape(app: AppHandle, region: Option<WindowRegion>) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::Graphics::Gdi::{
+            CombineRgn, CreateRectRgn, DeleteObject, HGDIOBJ, HRGN, RGN_OR, SetWindowRgn,
+        };
+
+        let Some(win) = app.get_webview_window(PET_WINDOW) else {
+            return Err("pet window not found".into());
+        };
+        let Ok(hwnd) = win.hwnd() else {
+            return Err("failed to read pet window handle".into());
+        };
+        let hwnd = HWND(hwnd.0 as *mut core::ffi::c_void);
+
+        let Some(region) = region else {
+            // A null region removes the clip: the whole (small) window is hit-testable.
+            // SAFETY: live HWND owned by this window.
+            unsafe {
+                SetWindowRgn(hwnd, HRGN::default(), true);
+            }
+            return Ok(());
+        };
+
+        let mut combined = HRGN::default();
+        for [x, y, w, h] in region.rects {
+            if w <= 0 || h <= 0 {
+                continue;
+            }
+            // SAFETY: plain GDI object creation; freed below or handed to the OS.
+            let r = unsafe { CreateRectRgn(x, y, x + w, y + h) };
+            if combined.is_invalid() {
+                combined = r;
+            } else {
+                unsafe {
+                    CombineRgn(combined, combined, r, RGN_OR);
+                    let _ = DeleteObject(HGDIOBJ(r.0));
+                }
+            }
+        }
+        if combined.is_invalid() {
+            return Err("failed to create window region".into());
+        }
+        // SAFETY: the OS takes ownership of `combined` once set — never freed here.
+        unsafe {
+            SetWindowRgn(hwnd, combined, true);
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (app, region);
+    }
+    Ok(())
 }

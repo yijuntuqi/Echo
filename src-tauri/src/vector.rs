@@ -33,18 +33,80 @@ impl VectorEngine {
         self.vec_available.load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    /// Nearest neighbours by cosine distance, newest-first within equal scores.
+    /// Nearest neighbours by cosine distance. Uses sqlite-vec's kNN query
+    /// against `vec_memories` and joins the source tables so each hit carries
+    /// its timestamp and a text excerpt for display.
     pub async fn search(
         &self,
-        _pool: Option<&crate::db::DbPool>,
-        _query: &[f32],
+        pool: Option<&crate::db::DbPool>,
+        query: &[f32],
         top_k: usize,
     ) -> Result<Vec<VectorHit>, String> {
         if !self.vec_available() {
             return Err("semantic search unavailable: vector extension not loaded".into());
         }
-        let _ = top_k;
-        Ok(Vec::new())
+        let pool = pool.ok_or("no database pool")?;
+        // sqlite-vec accepts little-endian f32 blobs.
+        let blob: Vec<u8> = query.iter().flat_map(|f| f.to_le_bytes()).collect();
+        sqlx::query_as::<_, VectorHit>(
+            "SELECT v.memory_id, v.memory_type, v.distance,
+                    COALESCE(c.timestamp, e.date, '') AS created_at,
+                    COALESCE(
+                        NULLIF(TRIM(c.user_message || ' ' || c.ai_reply), ''),
+                        e.description, ''
+                    ) AS content
+             FROM (SELECT memory_id, memory_type, distance
+                   FROM vec_memories
+                   WHERE embedding MATCH ? AND k = ?) v
+             LEFT JOIN conversations c
+                    ON v.memory_type = 'conversation' AND c.id = v.memory_id
+             LEFT JOIN events e
+                    ON v.memory_type = 'event' AND e.id = v.memory_id
+             ORDER BY v.distance
+             LIMIT ?",
+        )
+        .bind(blob)
+        .bind(top_k as i64)
+        .bind(top_k as i64)
+        .fetch_all(pool)
+        .await
+        .map_err(|e| e.to_string())
+    }
+}
+
+/// Index one memory for semantic search. Best-effort: without the vector
+/// extension the memory simply stays unindexed (lexical search still finds it).
+pub async fn store_memory(
+    pool: &crate::db::DbPool,
+    embedding: &[f32],
+    memory_id: i64,
+    memory_type: &str,
+) {
+    let engine = &crate::state().vectors;
+    if !engine.vec_available() {
+        return;
+    }
+    let blob: Vec<u8> = embedding.iter().flat_map(|f| f.to_le_bytes()).collect();
+    // Upsert by (type, id): a re-encoded memory replaces its old vector.
+    if let Err(e) = sqlx::query("DELETE FROM vec_memories WHERE memory_id = ? AND memory_type = ?")
+        .bind(memory_id)
+        .bind(memory_type)
+        .execute(pool)
+        .await
+    {
+        tracing::debug!(error = %e, "vector upsert delete failed");
+        return;
+    }
+    if let Err(e) = sqlx::query(
+        "INSERT INTO vec_memories(embedding, memory_id, memory_type) VALUES (?, ?, ?)",
+    )
+    .bind(blob)
+    .bind(memory_id)
+    .bind(memory_type)
+    .execute(pool)
+    .await
+    {
+        tracing::debug!(error = %e, "vector index insert failed");
     }
 }
 
@@ -70,10 +132,15 @@ pub async fn search_memory(query: String, top_k: usize) -> Result<Vec<VectorHit>
         }
     }
 
-    // Lexical fallback: FTS5 if present, otherwise a LIKE scan.
+    // Lexical fallback: FTS5 if present, otherwise a LIKE scan over both
+    // conversations and events. Each hit carries its timestamp and a text
+    // excerpt; the pseudo-distance reflects where the match landed so the
+    // UI's relevance percentage is not uniformly 100%.
     match sqlx::query_as::<_, VectorHit>(
         "SELECT c.id AS memory_id, 'conversation' AS memory_type,
-                0.0 AS distance
+                0.1 AS distance,
+                c.timestamp AS created_at,
+                TRIM(c.user_message || ' ' || c.ai_reply) AS content
          FROM fts_conversations f
          JOIN conversations c ON c.id = f.rowid
          WHERE fts_conversations MATCH ?
@@ -88,11 +155,22 @@ pub async fn search_memory(query: String, top_k: usize) -> Result<Vec<VectorHit>
         Err(_) => {
             let pattern = format!("%{query}%");
             sqlx::query_as::<_, VectorHit>(
-                "SELECT id AS memory_id, 'conversation' AS memory_type, 0.0 AS distance
+                "SELECT id AS memory_id, 'conversation' AS memory_type,
+                        CASE WHEN user_message LIKE ? THEN 0.05 ELSE 0.2 END AS distance,
+                        timestamp AS created_at,
+                        TRIM(user_message || ' ' || ai_reply) AS content
                  FROM conversations
                  WHERE user_message LIKE ? OR ai_reply LIKE ?
-                 ORDER BY id DESC LIMIT ?",
+                 UNION ALL
+                 SELECT id, 'event', 0.2 AS distance, date AS created_at,
+                        description AS content
+                 FROM events
+                 WHERE description LIKE ?
+                 ORDER BY distance, created_at DESC
+                 LIMIT ?",
             )
+            .bind(&pattern)
+            .bind(&pattern)
             .bind(&pattern)
             .bind(&pattern)
             .bind(top_k as i64)
@@ -130,6 +208,14 @@ pub async fn add_event(event: NewEvent) -> Result<i64, String> {
     .await
     .map_err(|e| e.to_string())?
     .last_insert_rowid();
+
+    // Index the event for semantic search; skipped silently when the
+    // embedding model is not ready (lexical search still finds it).
+    if let Some(embedding) = crate::state().embedding.get() {
+        if let Ok(vec) = embedding.encode(&event.description) {
+            store_memory(pool, &vec, id, "event").await;
+        }
+    }
     Ok(id)
 }
 
