@@ -53,6 +53,21 @@
     return clean.length > 64 ? clean.slice(0, 64) + '…' : clean;
   }
 
+  /** Collapse whitespace for the expanded view too. */
+  function fullText(text: string): string {
+    return text.replace(/\s+/g, ' ').trim();
+  }
+
+  /** Click a result to unfold its full content (the list only shows one line). */
+  let expandedHits = $state(new Set<string>());
+
+  function toggleHit(key: string): void {
+    const next = new Set(expandedHits);
+    if (next.has(key)) next.delete(key);
+    else next.add(key);
+    expandedHits = next;
+  }
+
   onMount(async () => {
     try {
       const [evo, timeline] = await Promise.all([
@@ -120,15 +135,27 @@
         {/if}
         <ul class="hits">
           {#each memoryStore.searchResults as hit (hit.memory_id + '-' + hit.memory_type)}
+            {@const key = hit.memory_id + '-' + hit.memory_type}
             <li>
-              <span class="kind">{hit.memory_type === 'conversation' ? '对话' : '事件'}</span>
-              <span class="when">{prettyDate(hit.created_at)}</span>
-              <span class="score">相关度 {relevance(hit.distance)}%</span>
-              <p class="snippet">{snippet(hit.content)}</p>
+              <button
+                type="button"
+                class="hit"
+                class:expanded={expandedHits.has(key)}
+                onclick={() => toggleHit(key)}
+              >
+                <span class="kind">{hit.memory_type === 'conversation' ? '对话' : '事件'}</span>
+                <span class="when">{prettyDate(hit.created_at)}</span>
+                <span class="score">相关度 {relevance(hit.distance)}%</span>
+                <p class="snippet">{expandedHits.has(key) ? fullText(hit.content) : snippet(hit.content)}</p>
+                <span class="unfold">{expandedHits.has(key) ? '收起 ▲' : '展开全文 ▼'}</span>
+              </button>
             </li>
           {/each}
         </ul>
-        <p class="hint">找到 {memoryStore.searchResults.length} 条相关记忆</p>
+        <p class="hint">
+          找到 {memoryStore.searchResults.length} 条相关记忆 · 点击可展开全文。
+          对话是连续的一条流，按日期即可分辨每次聊天的时间。
+        </p>
       {:else if query.trim() && !memoryStore.loading}
         <p class="hint">没有找到相关记忆</p>
       {/if}
@@ -172,13 +199,19 @@
   .hint { text-align: center; color: var(--color-text-muted); font-size: 12px; margin-top: 8px; }
   .error { color: #e74c3c; font-size: 13px; margin-top: 8px; }
   .hits { list-style: none; margin: 12px 0 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
-  .hits li {
+  .hits li { list-style: none; }
+  .hits .hit {
     display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap;
+    width: 100%; text-align: left; font: inherit;
     padding: 10px 12px; font-size: 13px;
     background: var(--color-bg-input);
     border: 1px solid var(--color-border);
     border-radius: var(--radius-sm);
+    cursor: pointer;
+    transition: border-color 0.15s;
   }
+  .hits .hit:hover, .hits .hit.expanded { border-color: var(--color-accent); }
+  .hits .hit:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 1px; }
   .hits .kind { color: var(--color-accent); font-weight: 600; flex-shrink: 0; }
   .hits .when { color: var(--color-text-muted); flex-shrink: 0; }
   .hits .score { margin-left: auto; color: var(--color-text-muted); flex-shrink: 0; }
@@ -189,5 +222,10 @@
     font-size: 12.5px;
     line-height: 1.5;
     overflow-wrap: anywhere;
+  }
+  .hits .unfold {
+    flex-basis: 100%;
+    font-size: 11.5px;
+    color: var(--color-text-muted);
   }
 </style>

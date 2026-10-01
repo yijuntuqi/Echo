@@ -178,7 +178,16 @@ fn handle_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
     match event.id().as_ref() {
         "show" => show_pet_window(app),
         "hide" => hide_pet_window(app),
-        "main_window" | "settings" => show_main_window(app),
+        // Both surface the main window, but land on different pages: the
+        // frontend answers `nav:goto` by switching its hash route.
+        "main_window" => {
+            show_main_window(app);
+            let _ = app.emit("nav:goto", "/");
+        }
+        "settings" => {
+            show_main_window(app);
+            let _ = app.emit("nav:goto", "/settings");
+        }
         // "quit" is distinct from "hide": it tears the process down.
         "quit" => app.exit(0),
         _ => {}
@@ -281,6 +290,52 @@ pub fn set_pet_position(app: AppHandle, x: f64, y: f64) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
+/// Resize and move the pet window in one atomic OS call. Issuing size and
+/// position from the frontend takes two round trips; between them the window
+/// can paint with the pet drawn outside the (already shrunk) bounds and the
+/// pet visibly blinks. One `SetWindowPos`, one frame.
+#[cfg(target_os = "windows")]
+#[tauri::command]
+pub fn place_pet_window(app: AppHandle, x: i32, y: i32, width: i32, height: i32) -> Result<(), String> {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{SetWindowPos, SWP_NOACTIVATE, SWP_NOZORDER};
+
+    let win = app
+        .get_webview_window(PET_WINDOW)
+        .ok_or_else(|| "pet window not found".to_string())?;
+    let Ok(raw) = win.hwnd() else {
+        return Err("failed to read pet window handle".into());
+    };
+    let hwnd = HWND(raw.0 as *mut core::ffi::c_void);
+    // SAFETY: live HWND owned by this window; flags preserve z-order/focus.
+    unsafe {
+        SetWindowPos(
+            hwnd,
+            HWND::default(),
+            x,
+            y,
+            width,
+            height,
+            SWP_NOZORDER | SWP_NOACTIVATE,
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Non-Windows fallback: two calls, same net effect.
+#[cfg(not(target_os = "windows"))]
+#[tauri::command]
+pub fn place_pet_window(app: AppHandle, x: i32, y: i32, width: i32, height: i32) -> Result<(), String> {
+    let win = app
+        .get_webview_window(PET_WINDOW)
+        .ok_or_else(|| "pet window not found".to_string())?;
+    win.set_size(PhysicalSize::new(width, height))
+        .map_err(|e| e.to_string())?;
+    win.set_position(PhysicalPosition::new(x, y))
+        .map_err(|e| e.to_string())
+}
+
 /// Open the chat panel next to the pet. The panel lives in the pet window
 /// (so it can follow the pet around); this only raises the `chat:open`
 /// event, which the pet window answers by expanding and showing the panel.
@@ -295,7 +350,13 @@ pub fn open_chat(app: AppHandle) -> Result<(), String> {
 pub struct WindowRegion {
     /// `[x, y, width, height]` rectangles; mouse input outside the union of
     /// these falls through to whatever is beneath the window.
+    #[serde(default)]
     pub rects: Vec<[i32; 4]>,
+    /// Optional `[x, y, width, height]` ellipse (the pet's egg silhouette).
+    /// The collapsed window uses it so the square's transparent corners let
+    /// clicks through to windows underneath.
+    #[serde(default)]
+    pub ellipse: Option<[i32; 4]>,
 }
 
 /// Restrict where the (transparent) pet window accepts mouse input.
@@ -303,14 +364,16 @@ pub struct WindowRegion {
 /// While the chat panel is docked the window grows to ~592x560, almost all of
 /// it empty transparency — without a region that invisible rectangle blocks
 /// clicks aimed at windows underneath (e.g. the main window's navigation).
-/// `None` removes the restriction (the collapsed 200x200 square is small).
+/// Even collapsed, the 200x200 square's corners would block, so the frontend
+/// always keeps a region set: rects for panel + pet, ellipse for the pet.
 #[tauri::command]
 pub fn set_pet_window_shape(app: AppHandle, region: Option<WindowRegion>) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
         use windows::Win32::Foundation::HWND;
         use windows::Win32::Graphics::Gdi::{
-            CombineRgn, CreateRectRgn, DeleteObject, HGDIOBJ, HRGN, RGN_OR, SetWindowRgn,
+            CombineRgn, CreateEllipticRgn, CreateRectRgn, DeleteObject, HGDIOBJ, HRGN, RGN_OR,
+            SetWindowRgn,
         };
 
         let Some(win) = app.get_webview_window(PET_WINDOW) else {
@@ -337,6 +400,18 @@ pub fn set_pet_window_shape(app: AppHandle, region: Option<WindowRegion>) -> Res
             }
             // SAFETY: plain GDI object creation; freed below or handed to the OS.
             let r = unsafe { CreateRectRgn(x, y, x + w, y + h) };
+            if combined.is_invalid() {
+                combined = r;
+            } else {
+                unsafe {
+                    CombineRgn(combined, combined, r, RGN_OR);
+                    let _ = DeleteObject(HGDIOBJ(r.0));
+                }
+            }
+        }
+        if let Some([x, y, w, h]) = region.ellipse.filter(|[_, _, w, h]| *w > 0 && *h > 0) {
+            // SAFETY: plain GDI object creation; freed below or handed to the OS.
+            let r = unsafe { CreateEllipticRgn(x, y, x + w, y + h) };
             if combined.is_invalid() {
                 combined = r;
             } else {

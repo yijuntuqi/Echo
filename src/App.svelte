@@ -70,6 +70,18 @@
       } catch (e) {
         console.warn('evolution:triggered listener unavailable:', e);
       }
+
+      // Tray 「主窗口」/「设置」 both surface this window; the payload picks
+      // the page they land on. Unknown routes are ignored.
+      try {
+        const unlistenNav = await on('nav:goto', (raw) => {
+          if (raw === '/' || raw === '/dashboard' || raw === '/settings') goto(raw);
+        });
+        if (disposed) unlistenNav();
+        else cleanups.push(unlistenNav);
+      } catch (e) {
+        console.warn('nav:goto listener unavailable:', e);
+      }
     })();
 
     return () => {

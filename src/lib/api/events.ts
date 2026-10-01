@@ -52,6 +52,8 @@ interface EventMap {
   'notification:show': { title: string; body: string };
   'model:progress': ModelProgress;
   'model:done': ModelDone;
+  /** Tray menu asks the main window to switch page (payload: hash route). */
+  'nav:goto': string;
 }
 
 type Handler<K extends keyof EventMap> = (payload: EventMap[K]) => void;

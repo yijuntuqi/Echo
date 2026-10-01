@@ -7,7 +7,7 @@
   import PetAvatar from '$lib/components/pet/PetAvatar.svelte';
   import ChatPanel from '$lib/components/chat/ChatPanel.svelte';
   import { petStore } from '$lib/stores/pet';
-  import { getPetPosition, showPetOverlay, setPetWindowShape } from '$lib/api/commands';
+  import { getPetPosition, showPetOverlay, setPetWindowShape, placePetWindow } from '$lib/api/commands';
   import { on } from '$lib/api/events';
 
   // Layout constants in CSS pixels. The pet keeps its 200x200 square; the
@@ -23,7 +23,6 @@
   let petX = $state(0);
   let petY = $state(0);
   let panelX = $state(PET_EDGE + 4);
-  let originBeforeExpand = $state<{ x: number; y: number } | null>(null);
 
   onMount(() => {
     // Keep the teardown synchronous; do the async work inside.
@@ -43,6 +42,22 @@
         await showPetOverlay();
       } catch {
         /* window may already be visible */
+      }
+      // The collapsed window is a 200x200 square whose transparent corners
+      // would block clicks on windows underneath (e.g. the main window's
+      // navigation): trim it to the pet's egg silhouette from the start.
+      try {
+        const scale = window.devicePixelRatio || 1;
+        await setPetWindowShape({
+          ellipse: [
+            Math.round(28 * scale),
+            Math.round(8 * scale),
+            Math.round(144 * scale),
+            Math.round(176 * scale),
+          ],
+        });
+      } catch {
+        /* non-Tauri context or unsupported: window stays square */
       }
 
       // This window owns the avatar, so it — not the main window — plays the
@@ -96,7 +111,6 @@
       const w = Math.round(WINDOW_W * scale);
       const h = Math.round(WINDOW_H * scale);
       const pos = await win.outerPosition();
-      originBeforeExpand = { x: pos.x, y: pos.y };
 
       let x = pos.x;
       let y = pos.y;
@@ -126,15 +140,26 @@
       petY = expandUp ? WINDOW_H - PET_EDGE : 0;
       panelX = expandLeft ? 4 : PET_EDGE + 4;
 
-      if (x !== pos.x || y !== pos.y) await win.setPosition(new PhysicalPosition(x, y));
-      await win.setSize(new PhysicalSize(w, h));
+      if (x !== pos.x || y !== pos.y) {
+        // Atomic move+resize: separate calls can paint the pet outside the
+        // not-yet-grown window for a frame.
+        await placePetWindow(x, y, w, h).catch(() => {
+          /* fall back below if the atomic call is unavailable */
+          void win.setPosition(new PhysicalPosition(x, y));
+          void win.setSize(new PhysicalSize(w, h));
+        });
+      } else {
+        await win.setSize(new PhysicalSize(w, h));
+      }
       // The grown window is mostly empty transparency: without a hit-test
       // region that invisible rectangle would swallow clicks meant for
       // windows underneath (e.g. the main window's navigation).
-      await setPetWindowShape([
-        [Math.round(petX * scale), Math.round(petY * scale), Math.round(PET_EDGE * scale), Math.round(PET_EDGE * scale)],
-        [Math.round(panelX * scale), 0, Math.round(PANEL_W * scale), Math.round(WINDOW_H * scale)],
-      ]).catch(() => {});
+      await setPetWindowShape({
+        rects: [
+          [Math.round(petX * scale), Math.round(petY * scale), Math.round(PET_EDGE * scale), Math.round(PET_EDGE * scale)],
+          [Math.round(panelX * scale), 0, Math.round(PANEL_W * scale), Math.round(WINDOW_H * scale)],
+        ],
+      }).catch(() => {});
       expanded = true;
       panelOpen = true;
     } catch {
@@ -144,7 +169,9 @@
     }
   }
 
-  /** Shrink back to the pet's square and restore the original origin. */
+  /** Shrink back to just the pet's square, anchored where the pet is now.
+   * The pet itself never hides or jumps: it only stops sharing the window
+   * with the panel. Hiding the pet is a tray-only action. */
   async function closePanel(): Promise<void> {
     panelOpen = false;
     if (!expanded) return;
@@ -152,19 +179,38 @@
     try {
       const win = getCurrentWindow();
       const scale = window.devicePixelRatio || 1;
-      await win.setSize(
-        new PhysicalSize(Math.round(PET_EDGE * scale), Math.round(PET_EDGE * scale)),
-      );
-      if (originBeforeExpand) {
-        await win.setPosition(
-          new PhysicalPosition(originBeforeExpand.x, originBeforeExpand.y),
-        );
-        originBeforeExpand = null;
-      }
-      // Lift the region restriction: the 200x200 square is small enough that
-      // its corners blocking a sliver of background is acceptable, and the
-      // pet itself stays fully interactive.
-      await setPetWindowShape(null).catch(() => {});
+      // The window may have been dragged while expanded, so anchor the
+      // shrink to wherever the pet actually is right now (window origin +
+      // pet offset) instead of a stale pre-expand position.
+      const pos = await win.outerPosition();
+      const x = pos.x + Math.round(petX * scale);
+      const y = pos.y + Math.round(petY * scale);
+      // Reset the anchor and re-place the window in the same tick: petX must
+      // reach 0 as the 200x200 clip applies, or the pet would be drawn
+      // outside the shrunk window and vanish for a frame.
+      petX = 0;
+      petY = 0;
+      panelX = PET_EDGE + 4;
+      await placePetWindow(
+        x,
+        y,
+        Math.round(PET_EDGE * scale),
+        Math.round(PET_EDGE * scale),
+      ).catch(() => {
+        void win.setSize(new PhysicalSize(Math.round(PET_EDGE * scale), Math.round(PET_EDGE * scale)));
+        void win.setPosition(new PhysicalPosition(x, y));
+      });
+      // Even collapsed, the square's transparent corners would block clicks
+      // on windows underneath: keep a hit-test region shaped as the pet's
+      // egg silhouette so only the pet itself is interactive.
+      await setPetWindowShape({
+        ellipse: [
+          Math.round(28 * scale),
+          Math.round(8 * scale),
+          Math.round(144 * scale),
+          Math.round(176 * scale),
+        ],
+      }).catch(() => {});
     } catch {
       /* ignore */
     }

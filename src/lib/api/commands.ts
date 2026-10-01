@@ -24,15 +24,23 @@ export const getPetPosition = (): Promise<{ x: number; y: number } | null> =>
   invoke('get_pet_position');
 export const setPetPosition = (x: number, y: number): Promise<void> =>
   invoke('set_pet_position', { x, y });
+/** Resize + move the pet window in one atomic OS call (no blink in between). */
+export const placePetWindow = (x: number, y: number, width: number, height: number): Promise<void> =>
+  invoke('place_pet_window', { x, y, width, height });
 /** Surface the main window and ask it to open the chat panel. */
 export const openChat = (): Promise<void> => invoke('open_chat');
 /**
  * Restrict where the transparent pet window accepts mouse input: physical-px
- * `[x, y, w, h]` rects relative to the window; input outside their union falls
- * through. `null` lifts the restriction (whole window hit-testable).
+ * `[x, y, w, h]` rects (and an optional ellipse for the pet's silhouette)
+ * relative to the window; input outside their union falls through. `null`
+ * lifts the restriction (whole window hit-testable).
  */
-export const setPetWindowShape = (rects: [number, number, number, number][] | null): Promise<void> =>
-  invoke('set_pet_window_shape', { region: rects === null ? null : { rects } });
+export type PetShape = {
+  rects?: [number, number, number, number][];
+  ellipse?: [number, number, number, number];
+};
+export const setPetWindowShape = (shape: PetShape | null): Promise<void> =>
+  invoke('set_pet_window_shape', { region: shape });
 
 // --- chat ------------------------------------------------------------------
 /** Fire-and-forget: replies stream back over the `chat:stream` event. */

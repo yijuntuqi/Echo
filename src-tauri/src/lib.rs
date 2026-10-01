@@ -172,6 +172,7 @@ pub fn run() {
             window::get_click_through,
             window::get_pet_position,
             window::set_pet_position,
+            window::place_pet_window,
             window::open_chat,
             window::set_pet_window_shape,
             // chat
