@@ -276,6 +276,8 @@ fn toggle_pet_window(app: &AppHandle) {
             tracing::info!(?state, "tray toggle: showing pet window");
             let _ = win.show();
             let _ = win.set_always_on_top(true);
+            #[cfg(target_os = "windows")]
+            apply_pet_window_styles(&win);
         }
     }
 }
@@ -284,6 +286,10 @@ fn show_pet_window(app: &AppHandle) {
     if let Some(win) = app.get_webview_window(PET_WINDOW) {
         let _ = win.show();
         let _ = win.set_always_on_top(true);
+        // Re-assert the borderless style on every show: the ghost title bar
+        // has been observed to come back around show/expand transitions.
+        #[cfg(target_os = "windows")]
+        apply_pet_window_styles(&win);
     }
 }
 
@@ -376,6 +382,9 @@ pub fn place_pet_window(app: AppHandle, x: i32, y: i32, width: i32, height: i32)
         )
         .map_err(|e| e.to_string())?;
     }
+    // A size change is one of the moments Windows may briefly re-enable the
+    // non-client frame — re-assert "no frame" right after (idempotent).
+    apply_pet_window_styles(&win);
     Ok(())
 }
 
@@ -446,6 +455,9 @@ pub fn set_pet_window_shape(app: AppHandle, region: Option<WindowRegion>) -> Res
             unsafe {
                 SetWindowRgn(hwnd, HRGN::default(), true);
             }
+            // SetWindowRgn forces a non-client recalculation — exactly when
+            // the ghost title bar reappeared. Re-assert "no frame".
+            apply_pet_window_styles(&win);
             return Ok(());
         };
 
@@ -484,6 +496,9 @@ pub fn set_pet_window_shape(app: AppHandle, region: Option<WindowRegion>) -> Res
         unsafe {
             SetWindowRgn(hwnd, combined, true);
         }
+        // Same reason as the null-region path: a region change makes the
+        // system recalculate the non-client area; re-assert "no frame".
+        apply_pet_window_styles(&win);
     }
     #[cfg(not(target_os = "windows"))]
     {

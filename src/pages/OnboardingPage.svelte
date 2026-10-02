@@ -44,8 +44,10 @@
           theme,
           notifications,
           auto_start: autoStart,
-          user_api_key: userApiKey || undefined,
-          user_base_url: userBaseUrl.trim() || undefined,
+          // Empty string = "not set": the Rust side falls back to the shared
+          // key for any empty key, so no need to send undefined here.
+          user_api_key: userApiKey.trim(),
+          user_base_url: userBaseUrl.trim(),
           model_preference: 'auto',
         },
       );

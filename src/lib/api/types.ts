@@ -34,9 +34,12 @@ export interface Settings {
   theme: 'light' | 'dark' | 'auto';
   notifications: boolean;
   auto_start: boolean;
-  user_api_key?: string;
+  /** Empty string = use the built-in shared key. Required (not optional):
+   * these feed a `$bindable` with a fallback in TextField, and Svelte 5
+   * throws `props_invalid_value` when `undefined` is bound to one. */
+  user_api_key: string;
   /** OpenAI-compatible endpoint paired with a user key; empty = default. */
-  user_base_url?: string;
+  user_base_url: string;
   model_preference: 'daily' | 'premium' | 'auto';
 }
 

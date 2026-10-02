@@ -6,8 +6,8 @@ const DEFAULTS: Settings = {
   theme: 'auto',
   notifications: true,
   auto_start: true,
-  user_api_key: undefined,
-  user_base_url: undefined,
+  user_api_key: '',
+  user_base_url: '',
   model_preference: 'auto',
 };
 
