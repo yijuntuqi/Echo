@@ -109,7 +109,9 @@ fn build_pet_window(app: &AppHandle) -> Result<WebviewWindow, Box<dyn std::error
     {
         use windows::Win32::Foundation::HWND;
         use windows::Win32::UI::WindowsAndMessaging::{
-            GetWindowLongPtrW, SetWindowLongPtrW, GWL_EXSTYLE, WS_EX_LAYERED, WS_EX_TOPMOST,
+            GetWindowLongPtrW, SetWindowLongPtrW, SetWindowPos, GWL_EXSTYLE, GWL_STYLE,
+            SWP_FRAMECHANGED, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, WS_CAPTION, WS_EX_LAYERED,
+            WS_EX_TOPMOST, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_SYSMENU, WS_THICKFRAME,
         };
         if let Ok(raw) = win.hwnd() {
             let hwnd = HWND(raw.0 as *mut core::ffi::c_void);
@@ -125,6 +127,25 @@ fn build_pet_window(app: &AppHandle) -> Result<WebviewWindow, Box<dyn std::error
                     hwnd,
                     GWL_EXSTYLE,
                     current | WS_EX_LAYERED.0 as isize | WS_EX_TOPMOST.0 as isize,
+                );
+                // Strip every frame-bearing style bit: some DWM combinations
+                // paint a caption (title bar) on a borderless window once it
+                // carries a hit-test region. With the style bits gone there is
+                // no frame for DWM to resurrect. SWP_FRAMECHANGED makes the
+                // style change take effect immediately.
+                let style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+                let frame_bits = (WS_CAPTION | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX
+                    | WS_SYSMENU)
+                    .0 as isize;
+                SetWindowLongPtrW(hwnd, GWL_STYLE, style & !frame_bits);
+                let _ = SetWindowPos(
+                    hwnd,
+                    HWND::default(),
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER,
                 );
             }
         }
@@ -178,14 +199,20 @@ fn handle_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
     match event.id().as_ref() {
         "show" => show_pet_window(app),
         "hide" => hide_pet_window(app),
-        // Both surface the main window, but land on different pages: the
-        // frontend answers `nav:goto` by switching its hash route.
+        // Both surface the main window, but land on different pages. For
+        // 设置 the route is set directly in the webview (eval on the hash)
+        // rather than via an event round-trip: the router's hashchange
+        // listener is registered at module init, so it cannot miss. The
+        // `nav:goto` event stays as a redundant second path.
         "main_window" => {
             show_main_window(app);
             let _ = app.emit("nav:goto", "/");
         }
         "settings" => {
             show_main_window(app);
+            if let Some(win) = app.get_webview_window(MAIN_WINDOW) {
+                let _ = win.eval("window.location.hash = '#/settings';");
+            }
             let _ = app.emit("nav:goto", "/settings");
         }
         // "quit" is distinct from "hide": it tears the process down.

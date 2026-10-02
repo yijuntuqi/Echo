@@ -175,7 +175,6 @@
   async function closePanel(): Promise<void> {
     panelOpen = false;
     if (!expanded) return;
-    expanded = false;
     try {
       const win = getCurrentWindow();
       const scale = window.devicePixelRatio || 1;
@@ -185,21 +184,23 @@
       const pos = await win.outerPosition();
       const x = pos.x + Math.round(petX * scale);
       const y = pos.y + Math.round(petY * scale);
-      // Reset the anchor and re-place the window in the same tick: petX must
-      // reach 0 as the 200x200 clip applies, or the pet would be drawn
-      // outside the shrunk window and vanish for a frame.
+      const w = Math.round(PET_EDGE * scale);
+      const h = Math.round(PET_EDGE * scale);
+      // Collapse the window FIRST; only touch the anchor/state once the
+      // resize actually happened. A failed resize must not strand the state
+      // in "collapsed" while the window is still expanded — that left a
+      // mostly-invisible window with the egg floating in the corner.
+      try {
+        await placePetWindow(x, y, w, h);
+      } catch {
+        await win.setSize(new PhysicalSize(w, h));
+        await win.setPosition(new PhysicalPosition(x, y));
+      }
+      expanded = false;
+      panelOpen = false;
       petX = 0;
       petY = 0;
       panelX = PET_EDGE + 4;
-      await placePetWindow(
-        x,
-        y,
-        Math.round(PET_EDGE * scale),
-        Math.round(PET_EDGE * scale),
-      ).catch(() => {
-        void win.setSize(new PhysicalSize(Math.round(PET_EDGE * scale), Math.round(PET_EDGE * scale)));
-        void win.setPosition(new PhysicalPosition(x, y));
-      });
       // Even collapsed, the square's transparent corners would block clicks
       // on windows underneath: keep a hit-test region shaped as the pet's
       // egg silhouette so only the pet itself is interactive.
@@ -211,8 +212,12 @@
           Math.round(176 * scale),
         ],
       }).catch(() => {});
-    } catch {
-      /* ignore */
+    } catch (e) {
+      console.warn('failed to collapse pet window:', e);
+      // Window is probably still expanded: re-show the panel so the UI
+      // matches the window instead of leaving an invisible dead rectangle.
+      expanded = true;
+      panelOpen = true;
     }
   }
 </script>
