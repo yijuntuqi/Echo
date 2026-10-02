@@ -86,73 +86,102 @@ impl WindowManager {
 
 fn build_pet_window(app: &AppHandle) -> Result<WebviewWindow, Box<dyn std::error::Error>> {
     // `tauri.conf.json` already declares this window; reuse it if it exists.
-    if let Some(existing) = app.get_webview_window(PET_WINDOW) {
-        return Ok(existing);
-    }
-
-    let win = WebviewWindowBuilder::new(app, PET_WINDOW, WebviewUrl::App("pet.html".into()))
-        .title("Echo Pet")
-        .inner_size(200.0, 200.0)
-        .min_inner_size(160.0, 160.0)
-        // No max: the window grows to ~592x560 while the chat panel is
-        // docked beside the pet, then shrinks back programmatically.
-        .resizable(false)
-        .decorations(false)
-        .transparent(true)
-        .always_on_top(true)
-        .skip_taskbar(true)
-        .shadow(false)
-        .visible(false)
-        .build()?;
-
-    #[cfg(target_os = "windows")]
-    {
-        use windows::Win32::Foundation::HWND;
-        use windows::Win32::UI::WindowsAndMessaging::{
-            GetWindowLongPtrW, SetWindowLongPtrW, SetWindowPos, GWL_EXSTYLE, GWL_STYLE,
-            SWP_FRAMECHANGED, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, WS_CAPTION, WS_EX_LAYERED,
-            WS_EX_TOPMOST, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_SYSMENU, WS_THICKFRAME,
-        };
-        if let Ok(raw) = win.hwnd() {
-            let hwnd = HWND(raw.0 as *mut core::ffi::c_void);
-            // SAFETY: called on the UI thread with a live HWND owned by this window.
-            // WS_EX_LAYERED is required for per-pixel alpha on a transparent window.
-            // WS_EX_TRANSPARENT is deliberately NOT set here: it makes every
-            // mouse event fall through the pet, killing drag and click. The
-            // initial style is interactive; `set_click_through` toggles the
-            // flag at runtime when the user asks for pass-through.
-            unsafe {
-                let current = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-                SetWindowLongPtrW(
-                    hwnd,
-                    GWL_EXSTYLE,
-                    current | WS_EX_LAYERED.0 as isize | WS_EX_TOPMOST.0 as isize,
-                );
-                // Strip every frame-bearing style bit: some DWM combinations
-                // paint a caption (title bar) on a borderless window once it
-                // carries a hit-test region. With the style bits gone there is
-                // no frame for DWM to resurrect. SWP_FRAMECHANGED makes the
-                // style change take effect immediately.
-                let style = GetWindowLongPtrW(hwnd, GWL_STYLE);
-                let frame_bits = (WS_CAPTION | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX
-                    | WS_SYSMENU)
-                    .0 as isize;
-                SetWindowLongPtrW(hwnd, GWL_STYLE, style & !frame_bits);
-                let _ = SetWindowPos(
-                    hwnd,
-                    HWND::default(),
-                    0,
-                    0,
-                    0,
-                    0,
-                    SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER,
-                );
-            }
+    let win = match app.get_webview_window(PET_WINDOW) {
+        Some(existing) => existing,
+        None => {
+            WebviewWindowBuilder::new(app, PET_WINDOW, WebviewUrl::App("pet.html".into()))
+                .title("Echo Pet")
+                .inner_size(200.0, 200.0)
+                .min_inner_size(160.0, 160.0)
+                // No max: the window grows to ~592x560 while the chat panel is
+                // docked beside the pet, then shrinks back programmatically.
+                .resizable(false)
+                .decorations(false)
+                .transparent(true)
+                .always_on_top(true)
+                .skip_taskbar(true)
+                .shadow(false)
+                .visible(false)
+                .build()?
         }
-    }
+    };
+
+    // Applies no matter where the window came from. The config-declared one
+    // used to skip this entirely (early return above), so its style bits were
+    // never cleaned — which is exactly why the ghost title bar kept coming
+    // back.
+    #[cfg(target_os = "windows")]
+    apply_pet_window_styles(&win);
 
     Ok(win)
 }
+
+/// Force the pet window to stay borderless and layered, on every code path.
+/// Some DWM combinations paint a caption (title bar) on a borderless window
+/// once it carries a hit-test region — the bar that intermittently appeared
+/// above the pet, typically right after expand/collapse re-set the region.
+/// Both strip every frame-bearing style bit AND forbid DWM non-client
+/// rendering, so no code path can resurrect a title bar.
+#[cfg(target_os = "windows")]
+fn apply_pet_window_styles(win: &WebviewWindow) {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::Graphics::Dwm::{
+        DwmSetWindowAttribute, DWMWA_NCRENDERING_POLICY, DWMNCRENDERINGPOLICY,
+    };
+    // (const name varies across windows-crate versions; the value 1 is
+    // DWMNCRP_DISABLED — never render the window's non-client area.)
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetWindowLongPtrW, SetWindowLongPtrW, SetWindowPos, GWL_EXSTYLE, GWL_STYLE,
+        SWP_FRAMECHANGED, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, WS_CAPTION, WS_EX_LAYERED,
+        WS_EX_TOPMOST, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_SYSMENU, WS_THICKFRAME,
+    };
+
+    let Ok(raw) = win.hwnd() else {
+        return;
+    };
+    let hwnd = HWND(raw.0 as *mut core::ffi::c_void);
+    // SAFETY: called on the UI thread with a live HWND owned by this window;
+    // only style bits and DWM attributes are touched.
+    unsafe {
+        // WS_EX_LAYERED is required for per-pixel alpha on a transparent
+        // window. WS_EX_TRANSPARENT is deliberately NOT set: it makes every
+        // mouse event fall through the pet, killing drag and click.
+        // `set_click_through` toggles that flag at runtime on demand.
+        let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        SetWindowLongPtrW(
+            hwnd,
+            GWL_EXSTYLE,
+            ex | WS_EX_LAYERED.0 as isize | WS_EX_TOPMOST.0 as isize,
+        );
+        // Strip every frame-bearing style bit; SWP_FRAMECHANGED applies it.
+        let style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+        let frame_bits = (WS_CAPTION | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX
+            | WS_SYSMENU)
+            .0 as isize;
+        SetWindowLongPtrW(hwnd, GWL_STYLE, style & !frame_bits);
+        // Belt and braces: tell DWM this window has no non-client area to
+        // render, ever.
+        let policy = DWMNCRENDERINGPOLICY(1);
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_NCRENDERING_POLICY,
+            &policy as *const _ as *const core::ffi::c_void,
+            std::mem::size_of::<DWMNCRENDERINGPOLICY>() as u32,
+        );
+        let _ = SetWindowPos(
+            hwnd,
+            HWND::default(),
+            0,
+            0,
+            0,
+            0,
+            SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER,
+        );
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn apply_pet_window_styles(_win: &WebviewWindow) {}
 
 fn build_tray(app: &AppHandle) -> Result<tauri::tray::TrayIcon, Box<dyn std::error::Error>> {
     let show = MenuItemBuilder::with_id("show", "显示宠物").build(app)?;

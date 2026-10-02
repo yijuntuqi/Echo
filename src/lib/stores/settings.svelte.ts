@@ -16,7 +16,14 @@ function createSettingsStore() {
   let loaded = $state(false);
 
   function load(next: Partial<Settings>): void {
-    settings = { ...DEFAULTS, ...next };
+    // Backend may hand back null/undefined optional strings; input bindings
+    // need real strings, so coalesce them here once and for all.
+    settings = {
+      ...DEFAULTS,
+      ...next,
+      user_api_key: next.user_api_key ?? '',
+      user_base_url: next.user_base_url ?? '',
+    };
     loaded = true;
     if (typeof document !== 'undefined') {
       document.documentElement.dataset.theme = settings.theme;

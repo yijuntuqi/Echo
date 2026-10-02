@@ -16,31 +16,34 @@
   import OnboardingPage from './pages/OnboardingPage.svelte';
 
   let booting = $state(true);
+  // Any uncaught error in either window shows here: a silent white screen is
+  // undiagnosable from the outside, a visible message is half the fix.
+  let fatalMessage = $state('');
 
   onMount(() => {
     // Keep the teardown synchronous; do the async work inside.
     let disposed = false;
     const cleanups: (() => void)[] = [];
 
-    void (async () => {
-      try {
-        const done = await getOnboardingStatus();
-        if (disposed) return;
-        if (!done) {
-          goto('/onboarding');
-        } else {
-          const s = await getSettings();
-          settingsStore.load(s);
-          document.documentElement.dataset.theme = s.theme || 'auto';
-        }
-      } catch (e) {
-        // Backend not ready yet: fall back to home so the shell still renders.
-        console.warn('onboarding status unavailable:', e);
-      } finally {
-        if (!disposed) booting = false;
-      }
+    const showFatal = (msg: string) => {
+      fatalMessage = msg.slice(0, 300);
+      window.setTimeout(() => (fatalMessage = ''), 12000);
+    };
+    const onError = (e: ErrorEvent) => showFatal(e.message || String(e.error));
+    const onReject = (e: PromiseRejectionEvent) => showFatal(String(e.reason));
+    window.addEventListener('error', onError);
+    window.addEventListener('unhandledrejection', onReject);
 
-      // A finished turn carries today's emotional read; keep the heatmap live.
+    // Never let a hung backend command pin the shell on the boot screen:
+    // after 8s show the UI anyway (commands keep resolving in background).
+    const bootTimeout = window.setTimeout(() => {
+      if (!disposed) booting = false;
+    }, 8000);
+
+    void (async () => {
+      // Register event listeners BEFORE anything else: tray events can fire
+      // while the onboarding/settings commands are still resolving, and a
+      // listener registered after that misses them for good.
       try {
         const unlistenMood = await on('mood:updated', (m) => {
           moodStore.upsert({ date: m.date, emotion: m.emotion, weight: m.weight, source: 'auto' });
@@ -82,16 +85,40 @@
       } catch (e) {
         console.warn('nav:goto listener unavailable:', e);
       }
+
+      try {
+        const done = await getOnboardingStatus();
+        if (disposed) return;
+        if (!done) {
+          goto('/onboarding');
+        } else {
+          const s = await getSettings();
+          settingsStore.load(s);
+          document.documentElement.dataset.theme = s.theme || 'auto';
+        }
+      } catch (e) {
+        // Backend not ready yet: fall back to home so the shell still renders.
+        console.warn('onboarding status unavailable:', e);
+      } finally {
+        window.clearTimeout(bootTimeout);
+        if (!disposed) booting = false;
+      }
     })();
 
     return () => {
       disposed = true;
+      window.clearTimeout(bootTimeout);
       cleanups.forEach((fn) => fn());
+      window.removeEventListener('error', onError);
+      window.removeEventListener('unhandledrejection', onReject);
     };
   });
 </script>
 
 <div class="app-root">
+  {#if fatalMessage}
+    <div class="fatal" role="alert">⚠ 页面出错：{fatalMessage}</div>
+  {/if}
   {#if booting}
     <div class="booting">正在唤醒 Echo…</div>
   {:else if router.current === '/onboarding'}
@@ -120,5 +147,17 @@
     min-height: 60vh;
     color: var(--color-text-muted);
     font-size: 14px;
+  }
+  .fatal {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    z-index: 9999;
+    padding: 8px 16px;
+    background: rgba(231, 76, 60, 0.92);
+    color: #fff;
+    font-size: 12.5px;
+    overflow-wrap: anywhere;
   }
 </style>

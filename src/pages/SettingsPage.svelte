@@ -15,6 +15,7 @@
 
   let saving = $state(false);
   let notice = $state('');
+  let loadError = $state('');
 
   onMount(async () => {
     try {
@@ -23,6 +24,9 @@
       systemStore.setAppVersion(u.version);
       systemStore.setUpdateAvailable(u.available);
     } catch (e) {
+      // Visible on the page: a silently failing settings page looks like a
+      // blank screen to the user.
+      loadError = String(e);
       console.warn('settings unavailable:', e);
     }
   });
@@ -52,6 +56,10 @@
     <h1>⚙️ 设置</h1>
     <a href="#/">← 返回</a>
   </header>
+
+  {#if loadError}
+    <p class="load-error" role="alert">设置加载失败：{loadError}</p>
+  {/if}
 
   <section class="card">
     <h2>👤 个人资料</h2>
@@ -160,6 +168,15 @@
   }
 
   .hint { font-size: 12px !important; }
+  .load-error {
+    margin: 0;
+    padding: 8px 12px;
+    background: rgba(231, 76, 60, 0.08);
+    color: #e74c3c;
+    font-size: 13px;
+    border-radius: var(--radius-sm);
+    overflow-wrap: anywhere;
+  }
   .footer { display: flex; align-items: center; gap: 12px; }
   .notice { font-size: 13px; color: var(--color-accent); }
 </style>
