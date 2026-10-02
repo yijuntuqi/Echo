@@ -35,9 +35,11 @@ impl Scheduler {
     pub async fn start(&self, app: &tauri::AppHandle) -> Result<(), String> {
         let sched = self.get_or_init().await;
 
-        // 08:00 local — birthday and anniversary greetings.
-        self.add(sched, "0 0 8 * * *", "anniversary-check", || async {
-            tracing::info!("checking anniversaries");
+        // 08:00 local — birthday and anniversary greetings (Task 8).
+        let greet_app = app.clone();
+        self.add(sched, "0 0 8 * * *", "anniversary-check", move || {
+            let app = greet_app.clone();
+            async move { crate::recap::anniversary_check(app).await }
         })
         .await?;
 
@@ -57,9 +59,11 @@ impl Scheduler {
         })
         .await?;
 
-        // 22:00 local — nightly recap of the day.
-        self.add(sched, "0 0 22 * * *", "daily-recap", || async {
-            tracing::info!("generating daily recap");
+        // 22:00 local — nightly recap of the day (Task 8).
+        let recap_app = app.clone();
+        self.add(sched, "0 0 22 * * *", "daily-recap", move || {
+            let app = recap_app.clone();
+            async move { crate::recap::daily_recap(app).await }
         })
         .await?;
 
