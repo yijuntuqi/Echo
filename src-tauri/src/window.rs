@@ -168,6 +168,20 @@ fn apply_pet_window_styles(win: &WebviewWindow) {
             &policy as *const _ as *const core::ffi::c_void,
             std::mem::size_of::<DWMNCRENDERINGPOLICY>() as u32,
         );
+        // Last layer of the onion: subclass the window procedure so that
+        // WM_NCCALCSIZE always reports "client area = the whole window".
+        // Field scans (top-level windows, style bits, child HWNDs) showed
+        // nobody re-setting a caption, which leaves the NC-calculation/
+        // DWM path as the only remaining mechanism — this closes it: with
+        // no non-client area, a caption cannot be painted even if some
+        // component re-adds the style bits behind our back.
+        let cur = GetWindowLongPtrW(hwnd, GWLP_WNDPROC);
+        if PET_ORIG_WNDPROC
+            .compare_exchange(0, cur, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            SetWindowLongPtrW(hwnd, GWLP_WNDPROC, pet_wndproc as isize);
+        }
         let _ = SetWindowPos(
             hwnd,
             HWND::default(),
@@ -178,6 +192,50 @@ fn apply_pet_window_styles(win: &WebviewWindow) {
             SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER,
         );
     }
+    // GWLP_WNDPROC / Ordering are used only inside the unsafe block above;
+    // the imports live there to keep the non-Windows build trivial.
+    use windows::Win32::UI::WindowsAndMessaging::GWLP_WNDPROC;
+    use std::sync::atomic::Ordering;
+}
+
+/// Original window procedure of the pet window, saved when the subclass is
+/// installed. 0 until then — the install is a one-way door.
+#[cfg(target_os = "windows")]
+static PET_ORIG_WNDPROC: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+
+/// Subclassed procedure for the pet window. Only WM_NCCALCSIZE is touched:
+/// with wParam TRUE it normally lets theDefWindowProc shrink the client area
+/// by the frame; returning 0 keeps the client area equal to the window rect,
+/// i.e. there is no non-client area at all.
+///
+/// SAFETY: installed once from `apply_pet_window_styles`; forwards every
+/// other message to the original procedure, and the original handle is never
+/// overwritten afterwards (the compare_exchange above is the only writer).
+#[cfg(target_os = "windows")]
+unsafe extern "system" fn pet_wndproc(
+    hwnd: windows::Win32::Foundation::HWND,
+    msg: u32,
+    wp: windows::Win32::Foundation::WPARAM,
+    lp: windows::Win32::Foundation::LPARAM,
+) -> windows::Win32::Foundation::LRESULT {
+    use windows::Win32::Foundation::LRESULT;
+    use windows::Win32::UI::WindowsAndMessaging::{CallWindowProcW, DefWindowProcW, WM_NCCALCSIZE};
+    use std::sync::atomic::Ordering;
+
+    if msg == WM_NCCALCSIZE && wp.0 != 0 {
+        return LRESULT(0);
+    }
+    let orig = PET_ORIG_WNDPROC.load(Ordering::Relaxed);
+    if orig == 0 {
+        return DefWindowProcW(hwnd, msg, wp, lp);
+    }
+    let prev: unsafe extern "system" fn(
+        windows::Win32::Foundation::HWND,
+        u32,
+        windows::Win32::Foundation::WPARAM,
+        windows::Win32::Foundation::LPARAM,
+    ) -> windows::Win32::Foundation::LRESULT = std::mem::transmute(orig);
+    CallWindowProcW(Some(prev), hwnd, msg, wp, lp)
 }
 
 #[cfg(not(target_os = "windows"))]
