@@ -73,13 +73,33 @@ pub async fn ensure_vector_table(pool: &DbPool) -> bool {
         return false;
     }
 
-    let created = sqlx::query(
+    // One-shot repair for databases created before the dimensionality fix:
+    // early builds made the table FLOAT[384] (the *English* small model's
+    // dim), while bge-small-zh-v1.5 is 512. No vector was ever stored back
+    // then — inference was still a stub — so dropping is lossless.
+    let stale = sqlx::query(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'vec_memories'",
+    )
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()
+    .and_then(|row| row.get::<Option<String>, _>("sql"))
+    .map(|sql| !sql.contains(&format!("FLOAT[{}]", crate::embedding::EMBEDDING_DIM)))
+    .unwrap_or(false);
+    if stale {
+        tracing::info!("rebuilding vec_memories with the correct vector dimension");
+        let _ = sqlx::query("DROP VIRTUAL TABLE vec_memories").execute(pool).await;
+    }
+
+    let created = sqlx::query(&format!(
         "CREATE VIRTUAL TABLE IF NOT EXISTS vec_memories USING vec0(
-            embedding FLOAT[384],
+            embedding FLOAT[{}],
             memory_id INTEGER,
             memory_type TEXT
         )",
-    )
+        crate::embedding::EMBEDDING_DIM,
+    ))
     .execute(pool)
     .await;
 

@@ -30,7 +30,20 @@ pub fn init(app: &AppHandle) {
         tracing::warn!("no app data dir; embedding model unavailable");
         return;
     };
-    let _ = crate::state().embedding.set(EmbeddingService::new(dir));
+    let svc = EmbeddingService::new(dir);
+    // On a restart the files are already cached and `kickoff` never fires, so
+    // warm the session in the background now — otherwise the first encode
+    // (inside a chat turn) pays the one-off model load inline. Read the
+    // service back through `state()` inside the task: it is a &'static and
+    // the service itself does not implement Clone.
+    if svc.is_ready() {
+        tauri::async_runtime::spawn_blocking(|| {
+            if let Some(s) = crate::state().embedding.get() {
+                s.warm_up();
+            }
+        });
+    }
+    let _ = crate::state().embedding.set(svc);
 }
 
 /// Serialises download attempts: one at a time. A tokio mutex (not an
@@ -79,6 +92,10 @@ async fn run_download(app: &AppHandle, svc: &EmbeddingService) {
     let (result, _) = tokio::join!(svc.ensure_model(tx), forward);
     match result {
         Ok(()) => {
+            // Warm the inference session here in the background task, so the
+            // first real encode (in a chat turn or a search) doesn't pay the
+            // one-off ~1s model load inline.
+            svc.warm_up();
             let _ = app.emit("model:done", ModelDone { ok: true, error: None });
         }
         Err(e) => {

@@ -90,6 +90,15 @@ tracing-subscriber = { version = "0.3", default-features = false, features = [
   "registry",
 ] }
 
+# Local embedding inference: Candle runs the downloaded bge-small-zh-v1.5
+# safetensors on CPU (pure Rust, no Python); `tokenizers` is HF's Rust
+# tokenizer that consumes the downloaded tokenizer.json. All candle crates
+# stay in version lockstep.
+candle-core = "0.9"
+candle-nn = "0.9"
+candle-transformers = "0.9"
+tokenizers = "0.21"
+
 [target.'cfg(windows)'.dependencies]
 # WS_EX_LAYERED / WS_EX_TRANSPARENT for the click-through pet window; GDI
 # regions so the expanded window only hits where the pet and panel actually

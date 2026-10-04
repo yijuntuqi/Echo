@@ -3,9 +3,18 @@
 //! The model is downloaded on first run and cached in the app data directory.
 //! Until it lands, memory search falls back to keyword matching so the feature
 //! degrades rather than disappearing.
+//!
+//! Inference is Candle on CPU (pure Rust): `BertModel` loads the downloaded
+//! `model.safetensors`, and HF's `tokenizers` consumes the downloaded
+//! `tokenizer.json`. The session is loaded lazily on the first `encode`, then
+//! cached for the life of the process.
 
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
+use candle_core::{DType, Device, Tensor};
+use candle_nn::VarBuilder;
+use candle_transformers::models::bert::{BertModel, Config as BertConfig};
 use thiserror::Error;
 use tokio::io::AsyncWriteExt;
 
@@ -21,30 +30,64 @@ pub enum EmbeddingError {
     Io(#[from] std::io::Error),
 }
 
-/// Dimensionality of `bge-small-zh-v1.5`, the model we ship with.
-pub const EMBEDDING_DIM: usize = 384;
+/// Dimensionality of `bge-small-zh-v1.5`.
+///
+/// 512, not 384: 384 is the *English* small model (bge-small-en-v1.5). The
+/// Chinese small model has hidden_size 512 and CLS-pools its last hidden
+/// state without a projection head, so the output dim equals 512. The vector
+/// table in `db.rs` is sized from this constant — they must stay in sync.
+pub const EMBEDDING_DIM: usize = 512;
 
 pub const MODEL_ID: &str = "BAAI/bge-small-zh-v1.5";
 /// Mirror first: the canonical host is slow or blocked on some networks.
 pub const MODEL_BASE_URL: &str = "https://hf-mirror.com";
 
+/// bge-zh-v1.5 was trained with this instruction prepended to *queries*
+/// (never to stored passages) for retrieval tasks; prepending it measurably
+/// improves recall.
+const QUERY_INSTRUCTION: &str = "为这个句子生成表示以用于检索相关文章：";
+
+/// BERT's position budget; inputs longer than this cannot be forwarded.
+const MAX_TOKENS: usize = 512;
+
+/// A loaded model, kept for the process lifetime.
+struct Session {
+    tokenizer: tokenizers::Tokenizer,
+    model: BertModel,
+    device: Device,
+}
+
 pub struct EmbeddingService {
     dir: PathBuf,
     base_url: String,
+    /// Lazily initialised on the first encode; `None` until the model files
+    /// are on disk. Locking loads the model at most once, and a concurrent
+    /// encode simply waits out that load.
+    session: Mutex<Option<Session>>,
 }
 
 impl EmbeddingService {
     pub fn new(dir: PathBuf) -> Self {
-        Self { dir, base_url: MODEL_BASE_URL.into() }
+        Self {
+            dir,
+            base_url: MODEL_BASE_URL.into(),
+            session: Mutex::new(None),
+        }
     }
 
     /// Override the mirror, for tests that serve the files locally.
     pub fn with_base_url(dir: PathBuf, base_url: &str) -> Self {
-        Self { dir, base_url: base_url.into() }
+        Self {
+            dir,
+            base_url: base_url.into(),
+            session: Mutex::new(None),
+        }
     }
 
     pub fn is_ready(&self) -> bool {
-        self.dir.join("model.safetensors").exists()
+        ["config.json", "tokenizer.json", "model.safetensors"]
+            .iter()
+            .all(|f| self.dir.join(f).exists())
     }
 
     pub fn dir(&self) -> &Path {
@@ -117,13 +160,116 @@ impl EmbeddingService {
         Ok(())
     }
 
-    /// Encode one string. Implemented in the Candle task; until then this
-    /// reports why it cannot run rather than returning a zero vector, which
-    /// would silently poison every similarity search.
-    pub fn encode(&self, _text: &str) -> Result<Vec<f32>, EmbeddingError> {
-        Err(EmbeddingError::Inference(
-            "embedding inference is not wired up yet".into(),
-        ))
+    /// Encode a stored memory (passage side — no retrieval instruction).
+    ///
+    /// Loads the model on first call (~1s), then caches it. Synchronous CPU
+    /// inference of this 24M-parameter model takes a few tens of
+    /// milliseconds — cheap enough that callers can use it inline.
+    pub fn encode(&self, text: &str) -> Result<Vec<f32>, EmbeddingError> {
+        self.encode_inner(text)
+    }
+
+    /// Load the inference session if the model files are ready. A no-op once
+    /// loaded; callers use it to move the one-off model load out of the first
+    /// real encode (e.g. right after the download finishes).
+    pub fn warm_up(&self) {
+        if !self.is_ready() {
+            return;
+        }
+        if let Ok(mut guard) = self.session.lock() {
+            if guard.is_none() {
+                *guard = self.load_session().ok();
+            }
+        }
+    }
+
+    /// Encode a search query, with the retrieval instruction bge-zh-v1.5
+    /// expects on the query side. Pair with [`Self::encode`], never encode
+    /// both sides the same way.
+    pub fn encode_query(&self, query: &str) -> Result<Vec<f32>, EmbeddingError> {
+        let prefixed = format!("{QUERY_INSTRUCTION}{query}");
+        self.encode_inner(&prefixed)
+    }
+
+    /// Never returns a zero vector on failure: a silent zero would poison
+    /// every similarity search with confident nonsense, so errors propagate.
+    fn encode_inner(&self, text: &str) -> Result<Vec<f32>, EmbeddingError> {
+        if !self.is_ready() {
+            return Err(EmbeddingError::NotDownloaded(self.dir.display().to_string()));
+        }
+
+        let mut guard = self
+            .session
+            .lock()
+            .map_err(|_| EmbeddingError::Inference("session lock poisoned".into()))?;
+        if guard.is_none() {
+            *guard = Some(self.load_session()?);
+        }
+        let session = guard.as_ref().expect("session just initialised");
+
+        let enc = session
+            .tokenizer
+            .encode(text, true)
+            .map_err(|e| EmbeddingError::Inference(format!("tokenize: {e}")))?;
+        let mut ids = enc.get_ids().to_vec();
+        let mut types = enc.get_type_ids().to_vec();
+        if ids.is_empty() {
+            return Err(EmbeddingError::Inference("empty input".into()));
+        }
+        ids.truncate(MAX_TOKENS);
+        types.truncate(MAX_TOKENS);
+
+        let ct = |r: candle_core::Result<Tensor>| {
+            r.map_err(|e| EmbeddingError::Inference(e.to_string()))
+        };
+        // Batch of one: (1, seq) ids and type ids, exactly what BERT expects.
+        let ids = ct(Tensor::new(&ids[..], &session.device))?.unsqueeze(0).map_err(|e| EmbeddingError::Inference(e.to_string()))?;
+        let types = ct(Tensor::new(&types[..], &session.device))?
+            .unsqueeze(0)
+            .map_err(|e| EmbeddingError::Inference(e.to_string()))?;
+
+        // No attention mask needed: batch of one has no padding to mask out.
+        let hidden = ct(session.model.forward(&ids, &types, None))?;
+        // CLS pooling: bge-zh-v1.5 represents a sentence with its [CLS] token.
+        let cls = ct(hidden.get(0))?;
+        let cls = ct(cls.get(0))?;
+        // L2-normalise (the `+ eps` guards the all-zero case).
+        let inv_norm = ct(cls.sqr())?;
+        let inv_norm = ct(inv_norm.sum_all())?;
+        let inv_norm = ct(inv_norm + 1e-12)?;
+        let inv_norm = ct(inv_norm.sqrt())?;
+        let inv_norm = ct(inv_norm.recip())?;
+        let normalized = ct(cls.broadcast_mul(&inv_norm))?;
+        let out: Vec<f32> = normalized
+            .to_vec1()
+            .map_err(|e| EmbeddingError::Inference(e.to_string()))?;
+
+        if out.len() != EMBEDDING_DIM {
+            return Err(EmbeddingError::Inference(format!(
+                "model output has dim {}, expected {EMBEDDING_DIM}",
+                out.len()
+            )));
+        }
+        Ok(out)
+    }
+
+    /// Load config + tokenizer + weights from the cache directory. Called
+    /// under the session lock, at most once per process.
+    fn load_session(&self) -> Result<Session, EmbeddingError> {
+        let device = Device::Cpu;
+        let config: BertConfig = serde_json::from_slice(&std::fs::read(self.dir.join("config.json"))?)
+            .map_err(|e| EmbeddingError::Inference(format!("config parse: {e}")))?;
+        let tokenizer = tokenizers::Tokenizer::from_file(self.dir.join("tokenizer.json"))
+            .map_err(|e| EmbeddingError::Inference(format!("tokenizer load: {e}")))?;
+        // Non-mmap load on purpose: the weights sit in our own cache dir and
+        // `ensure_model` could otherwise swap the file under the mapping.
+        let tensors = candle_core::safetensors::load(self.dir.join("model.safetensors"), &device)
+            .map_err(|e| EmbeddingError::Inference(format!("weights load: {e}")))?;
+        let vs = VarBuilder::from_tensors(tensors, DType::F32, &device);
+        let model = BertModel::load(vs, &config)
+            .map_err(|e| EmbeddingError::Inference(format!("model load: {e}")))?;
+        tracing::info!(dim = EMBEDDING_DIM, "embedding model loaded");
+        Ok(Session { tokenizer, model, device })
     }
 }
 
@@ -190,6 +336,23 @@ mod tests {
         let d = std::env::temp_dir().join(format!("echo-embed-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    /// Everything is_ready() looks at — used by the "already cached" test.
+    fn write_all_model_files(d: &std::path::Path) {
+        std::fs::write(d.join("config.json"), b"{}").unwrap();
+        std::fs::write(d.join("tokenizer.json"), b"{}").unwrap();
+        std::fs::write(d.join("model.safetensors"), b"cached").unwrap();
+    }
+
+    #[test]
+    fn encode_requires_the_model() {
+        let d = dir();
+        let svc = EmbeddingService::new(d.clone());
+        // Not a zero vector, not a panic: an explicit error the callers skip on.
+        assert!(matches!(svc.encode("你好"), Err(EmbeddingError::NotDownloaded(_))));
+        assert!(matches!(svc.encode_query("你好"), Err(EmbeddingError::NotDownloaded(_))));
+        std::fs::remove_dir_all(&d).ok();
     }
 
     #[tokio::test]
@@ -259,7 +422,7 @@ mod tests {
     async fn already_ready_skips_download() {
         let port = spawn_file_server(vec![], "").await;
         let d = dir();
-        std::fs::write(d.join("model.safetensors"), b"cached").unwrap();
+        write_all_model_files(&d);
         let svc = service(port, &d);
 
         let (tx, mut rx) = mpsc::channel(8);

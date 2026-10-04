@@ -120,9 +120,11 @@ pub async fn search_memory(query: String, top_k: usize) -> Result<Vec<VectorHit>
     let engine = &crate::state().vectors;
 
     // Semantic path, when both the extension and the model are present.
+    // Queries go through encode_query: bge-zh-v1.5 expects the retrieval
+    // instruction on the query side only.
     if engine.vec_available() {
         if let Some(embedding) = crate::state().embedding.get() {
-            if let Ok(vector) = embedding.encode(&query) {
+            if let Ok(vector) = embedding.encode_query(&query) {
                 if let Ok(hits) = engine.search(Some(pool), &vector, top_k).await {
                     if !hits.is_empty() {
                         return Ok(hits);
