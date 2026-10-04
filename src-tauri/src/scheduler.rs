@@ -67,10 +67,18 @@ impl Scheduler {
         })
         .await?;
 
-        // Sunday 10:00 — weekly backup. The cron crate's weekday field takes
-        // 1-7 (1 = Sunday) or names; `0` is invalid and fails to parse.
-        self.add(sched, "0 0 10 * * Sun", "weekly-backup", || async {
-            tracing::info!("running weekly backup");
+        // Sunday 10:00 — weekly encrypted snapshot of the database. The cron
+        // crate's weekday field takes 1-7 (1 = Sunday) or names; `0` is
+        // invalid and fails to parse.
+        let backup_app = app.clone();
+        self.add(sched, "0 0 10 * * Sun", "weekly-backup", move || {
+            let app = backup_app.clone();
+            async move {
+                match crate::backup::run_automatic_backup(&app).await {
+                    Ok(path) => tracing::info!(path = %path.display(), "weekly backup written"),
+                    Err(e) => tracing::warn!(error = %e, "weekly backup failed"),
+                }
+            }
         })
         .await?;
 

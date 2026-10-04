@@ -53,10 +53,12 @@ impl Default for BackupManager {
     }
 }
 
-#[tauri::command]
-pub async fn export_backup(app: AppHandle) -> Result<String, String> {
+/// Take one automatic snapshot into the default backups directory and prune
+/// the history. Shared by the settings export command and the Sunday
+/// scheduled job.
+pub async fn run_automatic_backup(app: &AppHandle) -> Result<PathBuf, String> {
     let pool = crate::pool()?;
-    let dir = BackupManager::default_dir(&app)?;
+    let dir = BackupManager::default_dir(app)?;
 
     let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
     let dest = dir.join(format!("echo-auto-{stamp}.echo.db"));
@@ -69,6 +71,12 @@ pub async fn export_backup(app: AppHandle) -> Result<String, String> {
         .map_err(|e| e.to_string())?;
 
     BackupManager::prune(&dir, 30)?;
+    Ok(dest)
+}
+
+#[tauri::command]
+pub async fn export_backup(app: AppHandle) -> Result<String, String> {
+    let dest = run_automatic_backup(&app).await?;
     Ok(dest.to_string_lossy().into_owned())
 }
 
