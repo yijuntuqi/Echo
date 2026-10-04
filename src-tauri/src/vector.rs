@@ -46,7 +46,11 @@ impl VectorEngine {
             return Err("semantic search unavailable: vector extension not loaded".into());
         }
         let pool = pool.ok_or("no database pool")?;
-        // sqlite-vec accepts little-endian f32 blobs.
+        // sqlite-vec accepts little-endian f32 blobs. kNN uses the LIMIT
+        // form only: sqlite-vec rejects a query that combines `k = ?` with
+        // a LIMIT (an outer LIMIT gets pushed down into the vec0 scan).
+        // The LEFT JOINs cannot fan out (both join columns are primary
+        // keys), so no outer LIMIT is needed after the kNN subquery.
         let blob: Vec<u8> = query.iter().flat_map(|f| f.to_le_bytes()).collect();
         sqlx::query_as::<_, VectorHit>(
             "SELECT v.memory_id, v.memory_type, v.distance,
@@ -57,16 +61,15 @@ impl VectorEngine {
                     ) AS content
              FROM (SELECT memory_id, memory_type, distance
                    FROM vec_memories
-                   WHERE embedding MATCH ? AND k = ?) v
+                   WHERE embedding MATCH ?
+                   LIMIT ?) v
              LEFT JOIN conversations c
                     ON v.memory_type = 'conversation' AND c.id = v.memory_id
              LEFT JOIN events e
                     ON v.memory_type = 'event' AND e.id = v.memory_id
-             ORDER BY v.distance
-             LIMIT ?",
+             ORDER BY v.distance",
         )
         .bind(blob)
-        .bind(top_k as i64)
         .bind(top_k as i64)
         .fetch_all(pool)
         .await
@@ -107,6 +110,99 @@ pub async fn store_memory(
     .await
     {
         tracing::debug!(error = %e, "vector index insert failed");
+        return;
+    }
+    // Record the successful indexing so the backfill pass can tell which
+    // memories still need encoding.
+    if let Err(e) = sqlx::query(
+        "INSERT OR REPLACE INTO vec_indexed(memory_type, memory_id) VALUES (?, ?)",
+    )
+    .bind(memory_type)
+    .bind(memory_id)
+    .execute(pool)
+    .await
+    {
+        tracing::debug!(error = %e, "vec_indexed bookkeeping failed");
+    }
+}
+
+/// Encode and index every memory that predates a working model.
+///
+/// The stub era left the vector table empty: everything the user ever said
+/// was only findable by keyword. One bounded pass per call (newest first);
+/// called in the background whenever the model becomes ready — after a
+/// download, or at startup when it was already cached. If more than the
+/// limit remains, the next trigger picks up the rest.
+pub async fn backfill_memories() {
+    let pool = match crate::pool() {
+        Ok(p) => p,
+        Err(_) => return, // before onboarding there is nothing to backfill
+    };
+    let state = crate::state();
+    let Some(embedding) = state.embedding.get() else { return };
+    if !state.vectors.vec_available() || !embedding.is_ready() {
+        return;
+    }
+
+    let mut indexed = 0usize;
+    let turns: Vec<(i64, String)> = match sqlx::query_as(
+        "SELECT c.id, TRIM(c.user_message || ' ' || c.ai_reply)
+         FROM conversations c
+         LEFT JOIN vec_indexed v ON v.memory_type = 'conversation' AND v.memory_id = c.id
+         WHERE v.memory_id IS NULL
+         ORDER BY c.id DESC
+         LIMIT 500",
+    )
+    .fetch_all(pool)
+    .await
+    {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::warn!(error = %e, "memory backfill: conversation query failed");
+            return;
+        }
+    };
+    for (id, text) in turns {
+        // Same shape as the per-turn indexer in chat.rs.
+        let text: String = text.chars().take(600).collect();
+        match embedding.encode(&text) {
+            Ok(vec) => {
+                store_memory(pool, &vec, id, "conversation").await;
+                indexed += 1;
+            }
+            Err(e) => tracing::debug!(error = %e, id, "backfill: encode failed"),
+        }
+    }
+
+    let events: Vec<(i64, String)> = match sqlx::query_as(
+        "SELECT e.id, e.description
+         FROM events e
+         LEFT JOIN vec_indexed v ON v.memory_type = 'event' AND v.memory_id = e.id
+         WHERE v.memory_id IS NULL
+         ORDER BY e.id DESC
+         LIMIT 500",
+    )
+    .fetch_all(pool)
+    .await
+    {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::warn!(error = %e, "memory backfill: event query failed");
+            return;
+        }
+    };
+    for (id, text) in events {
+        match embedding.encode(&text) {
+            Ok(vec) => {
+                store_memory(pool, &vec, id, "event").await;
+                indexed += 1;
+            }
+            Err(e) => tracing::debug!(error = %e, id, "backfill: encode failed"),
+        }
+    }
+
+    if indexed > 0 {
+        tracing::info!(indexed, "memory backfill pass");
     }
 }
 
@@ -135,12 +231,13 @@ pub async fn search_memory(query: String, top_k: usize) -> Result<Vec<VectorHit>
     }
 
     // Lexical fallback: FTS5 if present, otherwise a LIKE scan over both
-    // conversations and events. Each hit carries its timestamp and a text
-    // excerpt; the pseudo-distance reflects where the match landed so the
-    // UI's relevance percentage is not uniformly 100%.
+    // conversations and events. These hits have no query vector behind them
+    // (the memory may not even be indexed), so their "distance" is a rank
+    // proxy, deliberately conservative: a keyword match must not dress up
+    // as a 95% semantic match. 0.4 ≈ 80% / 0.5 ≈ 75% in the UI's mapping.
     match sqlx::query_as::<_, VectorHit>(
         "SELECT c.id AS memory_id, 'conversation' AS memory_type,
-                0.1 AS distance,
+                0.4 AS distance,
                 c.timestamp AS created_at,
                 TRIM(c.user_message || ' ' || c.ai_reply) AS content
          FROM fts_conversations f
@@ -158,13 +255,13 @@ pub async fn search_memory(query: String, top_k: usize) -> Result<Vec<VectorHit>
             let pattern = format!("%{query}%");
             sqlx::query_as::<_, VectorHit>(
                 "SELECT id AS memory_id, 'conversation' AS memory_type,
-                        CASE WHEN user_message LIKE ? THEN 0.05 ELSE 0.2 END AS distance,
+                        CASE WHEN user_message LIKE ? THEN 0.35 ELSE 0.5 END AS distance,
                         timestamp AS created_at,
                         TRIM(user_message || ' ' || ai_reply) AS content
                  FROM conversations
                  WHERE user_message LIKE ? OR ai_reply LIKE ?
                  UNION ALL
-                 SELECT id, 'event', 0.2 AS distance, date AS created_at,
+                 SELECT id, 'event', 0.5 AS distance, date AS created_at,
                         description AS content
                  FROM events
                  WHERE description LIKE ?

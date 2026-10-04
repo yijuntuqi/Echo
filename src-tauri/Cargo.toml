@@ -38,6 +38,12 @@ sqlx = { version = "0.8", default-features = false, features = [
   "json",
 ] }
 
+# Vector search extension for semantic memory recall. Compiled statically and
+# registered as an auto-extension in `db.rs::register_vec_extension`; without
+# that registration `vec_version()` does not exist and search silently falls
+# back to keyword matching.
+sqlite-vec = "0.1"
+
 # sqlx's `sqlite` feature links PLAIN SQLite, where `PRAGMA key` is a syntax
 # error — the database would silently open unencrypted and onboarding would
 # fail outright. This direct dependency unifies with sqlx's copy and swaps the

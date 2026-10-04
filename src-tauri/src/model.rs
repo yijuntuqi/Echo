@@ -37,9 +37,12 @@ pub fn init(app: &AppHandle) {
     // service back through `state()` inside the task: it is a &'static and
     // the service itself does not implement Clone.
     if svc.is_ready() {
-        tauri::async_runtime::spawn_blocking(|| {
+        tauri::async_runtime::spawn(async move {
             if let Some(s) = crate::state().embedding.get() {
-                s.warm_up();
+                // Move the one-off model load off the async workers.
+                let _ = tauri::async_runtime::spawn_blocking(move || s.warm_up()).await;
+                // The stub era left every memory unindexed; encode them now.
+                crate::vector::backfill_memories().await;
             }
         });
     }
@@ -94,8 +97,10 @@ async fn run_download(app: &AppHandle, svc: &EmbeddingService) {
         Ok(()) => {
             // Warm the inference session here in the background task, so the
             // first real encode (in a chat turn or a search) doesn't pay the
-            // one-off ~1s model load inline.
+            // one-off ~1s model load inline. Then index everything the stub
+            // era left behind.
             svc.warm_up();
+            tauri::async_runtime::spawn(crate::vector::backfill_memories());
             let _ = app.emit("model:done", ModelDone { ok: true, error: None });
         }
         Err(e) => {
