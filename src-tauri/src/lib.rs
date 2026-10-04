@@ -150,6 +150,11 @@ pub fn run() {
                 match onboarding::open_existing(&boot).await {
                     Ok(()) => {
                         window::show_main_window(&boot);
+                        // The database is open now. If the embedding model is
+                        // already cached, this is the first moment a backfill
+                        // can actually run — the attempt in model::init races
+                        // this open and no-ops on a closed database.
+                        tauri::async_runtime::spawn(crate::vector::backfill_memories());
                         // Keep greetings on their own schedule rather than
                         // firing the moment the app restarts.
                         if let Err(e) = state().scheduler.start(&boot).await {
@@ -184,6 +189,7 @@ pub fn run() {
             vector::search_memory,
             vector::add_event,
             vector::get_timeline,
+            vector::vector_debug,
             // evolution
             evolution::get_evolution_state,
             evolution::force_evolve,

@@ -63,6 +63,12 @@ pub async fn complete_onboarding(
             .map_err(|e| e.to_string())?;
         let _ = crate::state().db.set(manager.pool().clone());
         let _ = crate::state().db_path.set(manager.path().to_path_buf());
+        // Wire the capability probe's result into the vector engine. This
+        // flag gates every semantic-search branch, and nothing ever set it —
+        // search silently ran keyword-only forever.
+        crate::state()
+            .vectors
+            .set_vec_available(manager.vec_available());
         store_password(&generated)?;
     }
 
@@ -153,6 +159,9 @@ pub async fn open_existing(app: &AppHandle) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     let _ = crate::state().db.set(manager.pool().clone());
     let _ = crate::state().db_path.set(manager.path().to_path_buf());
+    crate::state()
+        .vectors
+        .set_vec_available(manager.vec_available());
     apply_chat_key_from_db(manager.pool()).await;
     Ok(())
 }

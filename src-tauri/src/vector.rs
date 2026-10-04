@@ -136,11 +136,22 @@ pub async fn store_memory(
 pub async fn backfill_memories() {
     let pool = match crate::pool() {
         Ok(p) => p,
-        Err(_) => return, // before onboarding there is nothing to backfill
+        Err(e) => {
+            tracing::debug!(error = %e, "backfill skipped: database not open yet");
+            return;
+        }
     };
     let state = crate::state();
-    let Some(embedding) = state.embedding.get() else { return };
+    let Some(embedding) = state.embedding.get() else {
+        tracing::debug!("backfill skipped: embedding service unavailable");
+        return;
+    };
     if !state.vectors.vec_available() || !embedding.is_ready() {
+        tracing::debug!(
+            vec_available = state.vectors.vec_available(),
+            model_ready = embedding.is_ready(),
+            "backfill skipped: pipeline not ready"
+        );
         return;
     }
 
@@ -202,8 +213,52 @@ pub async fn backfill_memories() {
     }
 
     if indexed > 0 {
-        tracing::info!(indexed, "memory backfill pass");
+        tracing::info!(indexed, "memory backfill pass indexed memories");
+    } else {
+        tracing::debug!("memory backfill pass found nothing to index");
     }
+}
+
+/// Live status of the semantic-search pipeline, for diagnosing why a search
+/// fell back to keywords. Row counts read the real tables; `null` counts
+/// mean the table does not exist (extension never became available).
+#[tauri::command]
+pub async fn vector_debug() -> Result<serde_json::Value, String> {
+    use sqlx::Row;
+
+    let state = crate::state();
+    let model_ready = state.embedding.get().map(|e| e.is_ready()).unwrap_or(false);
+    let mut out = serde_json::json!({
+        "vec_available": state.vectors.vec_available(),
+        "model_ready": model_ready,
+    });
+    if let Ok(pool) = crate::pool() {
+        let count = |sql: &'static str| {
+            let pool = pool.clone();
+            async move {
+                sqlx::query(sql)
+                    .fetch_one(&pool)
+                    .await
+                    .ok()
+                    .and_then(|r| r.try_get::<i64, _>(0).ok())
+            }
+        };
+        out["vec_memories_rows"] = match count("SELECT COUNT(*) FROM vec_memories").await {
+            Some(n) => serde_json::json!(n),
+            None => serde_json::Value::Null,
+        };
+        out["vec_indexed_rows"] = match count("SELECT COUNT(*) FROM vec_indexed").await {
+            Some(n) => serde_json::json!(n),
+            None => serde_json::Value::Null,
+        };
+        out["conversations"] = serde_json::json!(
+            count("SELECT COUNT(*) FROM conversations").await.unwrap_or(-1)
+        );
+        out["events"] = serde_json::json!(count("SELECT COUNT(*) FROM events").await.unwrap_or(-1));
+    } else {
+        out["database"] = serde_json::json!("closed (onboarding not finished)");
+    }
+    Ok(out)
 }
 
 fn pool() -> Result<&'static crate::db::DbPool, String> {
@@ -217,17 +272,26 @@ pub async fn search_memory(query: String, top_k: usize) -> Result<Vec<VectorHit>
 
     // Semantic path, when both the extension and the model are present.
     // Queries go through encode_query: bge-zh-v1.5 expects the retrieval
-    // instruction on the query side only.
-    if engine.vec_available() {
-        if let Some(embedding) = crate::state().embedding.get() {
-            if let Ok(vector) = embedding.encode_query(&query) {
-                if let Ok(hits) = engine.search(Some(pool), &vector, top_k).await {
-                    if !hits.is_empty() {
-                        return Ok(hits);
-                    }
+    // instruction on the query side only. Every fallback reason is logged —
+    // a silent keyword-only degradation cost us weeks.
+    if !engine.vec_available() {
+        tracing::warn!("semantic search skipped: vector extension unavailable");
+    } else if let Some(embedding) = crate::state().embedding.get() {
+        match embedding.encode_query(&query) {
+            Ok(vector) => match engine.search(Some(pool), &vector, top_k).await {
+                Ok(hits) if !hits.is_empty() => {
+                    tracing::info!(hits = hits.len(), "semantic search hit");
+                    return Ok(hits);
                 }
-            }
+                Ok(_) => tracing::info!("semantic search empty; trying keyword fallback"),
+                Err(e) => {
+                    tracing::warn!(error = %e, "semantic search query failed; trying keyword fallback")
+                }
+            },
+            Err(e) => tracing::warn!(error = %e, "query encode failed; trying keyword fallback"),
         }
+    } else {
+        tracing::warn!("semantic search skipped: embedding service unavailable");
     }
 
     // Lexical fallback: FTS5 if present, otherwise a LIKE scan over both

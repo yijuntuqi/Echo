@@ -156,6 +156,11 @@ pub async fn ensure_vector_table(pool: &DbPool) -> bool {
         tracing::warn!("vec_indexed bookkeeping table failed: {e}");
     }
 
+    tracing::info!(
+        dim = crate::embedding::EMBEDDING_DIM,
+        "sqlite-vec ready: vec_memories created"
+    );
+
     // Shadow-table indexes make the time/type filters used by mixed queries
     // cheap. Best-effort: an older sqlite-vec may not expose them.
     for stmt in [
