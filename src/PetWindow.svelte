@@ -3,6 +3,7 @@
      the window around it; closing the panel shrinks it back. -->
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { fly } from 'svelte/transition';
   import { getCurrentWindow, PhysicalPosition, PhysicalSize, currentMonitor } from '@tauri-apps/api/window';
   import PetAvatar from '$lib/components/pet/PetAvatar.svelte';
   import ChatPanel from '$lib/components/chat/ChatPanel.svelte';
@@ -228,7 +229,13 @@
   </div>
 
   {#if panelOpen}
-    <div class="panel-slot" style:left="{panelX}px">
+    <!-- Slides in from the pet's side; the out-transition plays on the
+         pre-collapse offset because panelX is reset only after the resize. -->
+    <div
+      class="panel-slot"
+      style:left="{panelX}px"
+      transition:fly={{ x: panelX > PET_EDGE ? 32 : -32, duration: 200 }}
+    >
       <ChatPanel bind:open={panelOpen} docked />
     </div>
   {/if}

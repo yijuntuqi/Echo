@@ -116,7 +116,7 @@
       <p class="chat-error" role="alert">{chatStore.lastError}</p>
     {/if}
 
-    <MessageList messages={chatStore.messages} />
+    <MessageList messages={chatStore.messages} streaming={chatStore.isStreaming} />
 
     <InputArea
       value={chatStore.inputValue}

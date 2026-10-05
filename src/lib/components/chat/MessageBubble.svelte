@@ -32,6 +32,12 @@
     overflow-wrap: anywhere;
   }
   .user .content { background: var(--color-accent); color: #fff; border-bottom-right-radius: 4px; }
-  .assistant .content { background: var(--color-bg-input); color: var(--color-text); border-bottom-left-radius: 4px; }
+  .assistant .content {
+    background: var(--color-bg-input);
+    color: var(--color-text);
+    border-bottom-left-radius: 4px;
+    /* Same-tone panel vs bubble needs a hairline or it reads as one surface. */
+    border: 1px solid var(--color-border);
+  }
   .ts { font-size: 10px; color: var(--color-text-muted); padding: 0 4px; }
 </style>
