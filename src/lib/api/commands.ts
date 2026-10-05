@@ -70,6 +70,8 @@ export const updateSettings = (patch: Partial<Settings>): Promise<void> =>
 
 // --- system ----------------------------------------------------------------
 export const checkUpdates = (): Promise<UpdateInfo> => invoke('check_updates');
+/** Download + install a pending update; the backend relaunches on success. */
+export const installUpdate = (): Promise<void> => invoke('install_update');
 export const getSystemInfo = (): Promise<SystemInfo> => invoke('get_system_info');
 
 // --- onboarding ------------------------------------------------------------

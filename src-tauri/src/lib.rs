@@ -121,6 +121,7 @@ pub fn run() {
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             Some(vec!["--autostart"]),
@@ -200,6 +201,7 @@ pub fn run() {
             backup::import_backup,
             // system
             system::check_updates,
+            system::install_update,
             system::get_system_info,
             // onboarding
             onboarding::complete_onboarding,
@@ -211,7 +213,8 @@ pub fn run() {
 
 pub mod system {
     use serde::Serialize;
-    use tauri::command;
+    use tauri::{command, AppHandle, Emitter};
+    use tauri_plugin_updater::UpdaterExt;
 
     #[derive(Serialize)]
     pub struct SystemInfo {
@@ -220,15 +223,13 @@ pub mod system {
         pub version: String,
     }
 
-    #[command]
-    pub fn check_updates() -> crate::chat::UpdateInfo {
-        // Update checking is wired up in the release pipeline; until a signed
-        // build exists there is nothing newer to offer.
-        crate::chat::UpdateInfo {
-            available: false,
-            version: env!("CARGO_PKG_VERSION").to_string(),
-            notes: String::new(),
-        }
+    /// Streaming download progress for a pending update, emitted on
+    /// `update:progress`.
+    #[derive(Serialize, Clone)]
+    pub struct UpdateProgress {
+        pub downloaded: u64,
+        /// `None` while the release endpoint does not declare a size.
+        pub total: Option<u64>,
     }
 
     #[command]
@@ -238,5 +239,68 @@ pub mod system {
             arch: std::env::consts::ARCH.to_string(),
             version: env!("CARGO_PKG_VERSION").to_string(),
         }
+    }
+
+    /// Ask the configured update endpoint whether a newer release exists.
+    ///
+    /// Dev builds have no reachable release (and the public key may still be
+    /// a placeholder); any failure there degrades to "up to date" instead of
+    /// erroring, so the settings page keeps working everywhere.
+    #[command]
+    pub async fn check_updates(app: AppHandle) -> Result<crate::chat::UpdateInfo, String> {
+        let version = env!("CARGO_PKG_VERSION").to_string();
+        let updater = app.updater().map_err(|e| e.to_string())?;
+        match updater.check().await {
+            Ok(Some(update)) => Ok(crate::chat::UpdateInfo {
+                available: true,
+                version: update.version.clone(),
+                notes: update.body.clone().unwrap_or_default(),
+            }),
+            Ok(None) => Ok(crate::chat::UpdateInfo {
+                available: false,
+                version,
+                notes: String::new(),
+            }),
+            Err(e) => {
+                tracing::debug!(error = %e, "update check unavailable");
+                Ok(crate::chat::UpdateInfo {
+                    available: false,
+                    version,
+                    notes: String::new(),
+                })
+            }
+        }
+    }
+
+    /// Download and install the pending update, streaming progress on
+    /// `update:progress`, then relaunch. On Windows the NSIS installer takes
+    /// over and ends this process, so the command usually never returns.
+    #[command]
+    pub async fn install_update(app: AppHandle) -> Result<(), String> {
+        let updater = app.updater().map_err(|e| e.to_string())?;
+        let Some(update) = updater.check().await.map_err(|e| e.to_string())? else {
+            return Err("没有可安装的更新".into());
+        };
+        // A Cell instead of captured mutable state: the progress callback is
+        // FnMut and the future must stay Send.
+        let downloaded = std::cell::Cell::new(0u64);
+        let emitter = app.clone();
+        update
+            .download_and_install(
+                move |chunk, total| {
+                    let total_bytes = downloaded.get() + chunk as u64;
+                    downloaded.set(total_bytes);
+                    let _ = emitter.emit("update:progress", UpdateProgress {
+                        downloaded: total_bytes,
+                        total,
+                    });
+                },
+                || {},
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        // Non-Windows paths (and successful silent installs) come back here:
+        // hand over to the new build.
+        app.restart()
     }
 }

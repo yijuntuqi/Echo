@@ -26,6 +26,10 @@ tauri-plugin-global-shortcut = "2"
 tauri-plugin-clipboard-manager = "2"
 tauri-plugin-opener = "2"
 tauri-plugin-process = "2"
+# Auto-update client: checks the release endpoint, verifies signatures with
+# the bundled public key, downloads and installs. Driven from the Rust side
+# (system::check_updates / system::install_update), no JS package needed.
+tauri-plugin-updater = "2"
 
 # Storage. `migrate!` reads ../migrations at compile time; `chrono`/`json` back
 # the row types and settings blob.

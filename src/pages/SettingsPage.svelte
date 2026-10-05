@@ -1,8 +1,9 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onDestroy, onMount } from 'svelte';
   import { settingsStore } from '$lib/stores/settings';
   import { systemStore } from '$lib/stores/system';
-  import { getSettings, updateSettings, checkUpdates } from '$lib/api/commands';
+  import { getSettings, updateSettings, checkUpdates, installUpdate } from '$lib/api/commands';
+  import { on } from '$lib/api/events';
   import Button from '$lib/components/ui/Button.svelte';
   import TextField from '$lib/components/ui/TextField.svelte';
   import Toggle from '$lib/components/ui/Toggle.svelte';
@@ -16,20 +17,50 @@
   let saving = $state(false);
   let notice = $state('');
   let loadError = $state('');
+  // Auto-update: progress bar while the pending release downloads.
+  let installing = $state(false);
+  let installPercent = $state<number | null>(null);
+  let unlistenProgress: (() => void) | undefined;
 
   onMount(async () => {
     try {
       settingsStore.load(await getSettings());
       const u = await checkUpdates();
       systemStore.setAppVersion(u.version);
-      systemStore.setUpdateAvailable(u.available);
+      systemStore.setUpdateAvailable(u.available, u.version);
     } catch (e) {
       // Visible on the page: a silently failing settings page looks like a
       // blank screen to the user.
       loadError = String(e);
       console.warn('settings unavailable:', e);
     }
+    try {
+      unlistenProgress = await on('update:progress', (p) => {
+        installPercent = p.total
+          ? Math.min(100, Math.round((p.downloaded / p.total) * 100))
+          : null;
+      });
+    } catch {
+      /* non-Tauri context: no progress events */
+    }
   });
+
+  onDestroy(() => unlistenProgress?.());
+
+  async function installUpdateNow() {
+    installing = true;
+    try {
+      // On success the backend relaunches the app; on Windows the NSIS
+      // installer ends this process, so reaching the catch below means it
+      // did not go through.
+      await installUpdate();
+    } catch (e) {
+      notice = '更新失败：' + e;
+    } finally {
+      installing = false;
+      installPercent = null;
+    }
+  }
 
   function setTheme(value: (typeof THEMES)[number][0]) {
     settingsStore.update({ theme: value });
@@ -108,7 +139,27 @@
   <section class="card">
     <h2>ℹ️ 关于</h2>
     <p>版本 {systemStore.appVersion}</p>
-    <p>{systemStore.updateAvailable ? '🆕 有新版本可用' : '✅ 已是最新版本'}</p>
+    {#if systemStore.updateAvailable}
+      <p>🆕 新版本{systemStore.updateVersion ? ` v${systemStore.updateVersion}` : ''}可用</p>
+      {#if installPercent !== null}
+        <div
+          class="update-bar"
+          role="progressbar"
+          aria-valuenow={installPercent}
+          aria-valuemin={0}
+          aria-valuemax={100}
+        >
+          <div class="update-fill" style="width: {installPercent}%"></div>
+        </div>
+        <p class="update-note">下载中… {installPercent}%（完成后自动重启）</p>
+      {:else}
+        <Button onclick={installUpdateNow} disabled={installing}>
+          {installing ? '正在更新…' : '下载并安装'}
+        </Button>
+      {/if}
+    {:else}
+      <p>✅ 已是最新版本</p>
+    {/if}
   </section>
 
   <div class="footer">
@@ -168,6 +219,18 @@
   }
 
   .hint { font-size: 12px !important; }
+  .update-bar {
+    height: 6px;
+    border-radius: 3px;
+    background: var(--color-border);
+    overflow: hidden;
+  }
+  .update-fill {
+    height: 100%;
+    background: var(--color-accent);
+    transition: width 0.2s ease;
+  }
+  .update-note { font-size: 12px !important; }
   .load-error {
     margin: 0;
     padding: 8px 12px;

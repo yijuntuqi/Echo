@@ -72,7 +72,15 @@
         "type": "downloadBootstrapper",
         "silent": true
       }
-    }
+    },
+    "createUpdaterArtifacts": true
   },
-  "plugins": {}
+  "plugins": {
+    "updater": {
+      "pubkey": "REPLACE_WITH_UPDATER_PUBLIC_KEY",
+      "endpoints": [
+        "https://github.com/yijuntuqi/Echo/releases/latest/download/latest.json"
+      ]
+    }
+  }
 }

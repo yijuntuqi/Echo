@@ -42,6 +42,12 @@ export type ModelDone = {
   error?: string;
 };
 
+export type UpdateProgress = {
+  downloaded: number;
+  /** `null` while the release endpoint does not declare a size. */
+  total: number | null;
+};
+
 interface EventMap {
   'chat:stream': StreamChunk;
   'chat:status': StatusEvent;
@@ -52,6 +58,7 @@ interface EventMap {
   'notification:show': { title: string; body: string };
   'model:progress': ModelProgress;
   'model:done': ModelDone;
+  'update:progress': UpdateProgress;
   /** Tray menu asks the main window to switch page (payload: hash route). */
   'nav:goto': string;
 }
