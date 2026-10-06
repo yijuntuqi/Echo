@@ -67,6 +67,20 @@
     document.documentElement.dataset.theme = value;
   }
 
+  // Light format checks — advisory only, never block saving.
+  const keyWarning = $derived.by(() => {
+    const key = (settingsStore.settings.user_api_key ?? '').trim();
+    return key && !key.startsWith('sk-')
+      ? '常见 Key 以 “sk-” 开头，当前格式可能不对（仍可保存）'
+      : '';
+  });
+  const urlWarning = $derived.by(() => {
+    const url = (settingsStore.settings.user_base_url ?? '').trim();
+    return url && !/^https?:\/\//i.test(url)
+      ? '接口地址需以 http:// 或 https:// 开头（仍可保存）'
+      : '';
+  });
+
   async function save() {
     saving = true;
     notice = '';
@@ -130,6 +144,8 @@
       bind:value={settingsStore.settings.user_base_url}
       placeholder="https://api.openai.com/v1"
     />
+    {#if keyWarning}<p class="warn" role="alert">⚠️ {keyWarning}</p>{/if}
+    {#if urlWarning}<p class="warn" role="alert">⚠️ {urlWarning}</p>{/if}
     <p class="hint">
       填入 Key 后使用你自己的额度，不受每日 200 次限制；留空则使用内置共享额度。
       接口地址需为 OpenAI 兼容格式，仅搭配自己的 Key 生效，留空使用内置服务商。
@@ -219,6 +235,7 @@
   }
 
   .hint { font-size: 12px !important; }
+  .card p.warn { font-size: 12px; color: #e67e22; }
   .update-bar {
     height: 6px;
     border-radius: 3px;

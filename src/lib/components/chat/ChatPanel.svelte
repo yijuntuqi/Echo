@@ -9,10 +9,18 @@
   import { on } from '$lib/api/events';
   import MessageList from './MessageList.svelte';
   import InputArea from './InputArea.svelte';
+  import { friendlyError } from '$lib/utils/errors';
 
   // `docked` flattens the panel to fill its container: the pet window docks
   // it beside the pet, where floating-corner positioning makes no sense.
   let { open = $bindable(false), docked = false } = $props();
+
+  // Retry bookkeeping: the text of the last failed send, for the 重试 button.
+  let lastFailedText = $state<string | null>(null);
+  // Two-step clear: the first click arms the confirm, the second within 3 s
+  // wipes the conversation (native dialogs look wrong in the pet window).
+  let confirmClear = $state(false);
+  let confirmTimer: ReturnType<typeof setTimeout> | undefined;
 
   const cleanups: (() => void)[] = [];
 
@@ -23,6 +31,7 @@
         if (chunk.done) {
           chatStore.endStream(chunk.emotion);
           chatStore.setLastError(null);
+          lastFailedText = null;
           petStore.playAnimation('idle');
         }
       }),
@@ -41,7 +50,10 @@
     );
   });
 
-  onDestroy(() => cleanups.forEach((fn) => fn()));
+  onDestroy(() => {
+    cleanups.forEach((fn) => fn());
+    if (confirmTimer) clearTimeout(confirmTimer);
+  });
 
   async function submit(text: string) {
     if (!text.trim() || chatStore.isStreaming) return;
@@ -59,10 +71,37 @@
       console.warn('send_message failed:', e);
       chatStore.endStream();
       chatStore.setOffline(true);
-      // Surface why nothing came back: offline badge alone hides the cause.
-      chatStore.setLastError(typeof e === 'string' ? e : String(e));
+      // Backend errors are raw English ("daily quota exhausted", reqwest
+      // timeouts); translate and keep the text for a one-click retry.
+      lastFailedText = text;
+      chatStore.setLastError(friendlyError(e));
       petStore.playAnimation('idle');
     }
+  }
+
+  /** Resend the failed turn: drop its remnants (empty assistant bubble +
+      user message) and send the same text again. */
+  function retry() {
+    if (chatStore.isStreaming || !lastFailedText) return;
+    chatStore.removeFailedTurn();
+    const text = lastFailedText;
+    lastFailedText = null;
+    chatStore.setLastError(null);
+    void submit(text);
+  }
+
+  /** Two-step clear: second click within 3 s wipes the conversation. */
+  function onClearClick() {
+    if (chatStore.isStreaming) return;
+    if (!confirmClear) {
+      confirmClear = true;
+      confirmTimer = setTimeout(() => (confirmClear = false), 3000);
+      return;
+    }
+    clearTimeout(confirmTimer);
+    confirmClear = false;
+    lastFailedText = null;
+    chatStore.reset();
   }
 
   // Progress of the currently downloading model file; `null` while unknown.
@@ -109,11 +148,25 @@
           <span class="online">在线</span>
         {/if}
       </div>
+      <button
+        class="clear-btn"
+        class:confirm={confirmClear}
+        onclick={onClearClick}
+        disabled={chatStore.isStreaming}
+        aria-label="清空对话"
+      >
+        {confirmClear ? '确认清空？' : '清空'}
+      </button>
       <button class="close-btn" onclick={close} aria-label="关闭对话">×</button>
     </header>
 
     {#if chatStore.lastError}
-      <p class="chat-error" role="alert">{chatStore.lastError}</p>
+      <p class="chat-error" role="alert">
+        <span class="err-text">{chatStore.lastError}</span>
+        {#if lastFailedText}
+          <button class="retry-btn" onclick={retry} disabled={chatStore.isStreaming}>↻ 重试</button>
+        {/if}
+      </p>
     {/if}
 
     <MessageList messages={chatStore.messages} streaming={chatStore.isStreaming} />
@@ -156,12 +209,41 @@
     box-shadow: none;
   }
   .chat-error {
+    display: flex;
+    align-items: center;
+    gap: 8px;
     padding: 6px 16px;
     color: #e74c3c;
     font-size: 12px;
     background: rgba(231, 76, 60, 0.08);
-    overflow-wrap: anywhere;
   }
+  .err-text { flex: 1; overflow-wrap: anywhere; }
+  .retry-btn {
+    flex-shrink: 0;
+    background: none;
+    border: 1px solid #e74c3c;
+    color: #e74c3c;
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .retry-btn:hover:not(:disabled) { background: #e74c3c; color: #fff; }
+  .retry-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+  .clear-btn {
+    background: none;
+    border: none;
+    font-size: 11px;
+    color: var(--color-text-muted);
+    padding: 2px 6px;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .clear-btn:hover:not(:disabled) { color: var(--color-text); background: var(--color-bg-input); }
+  .clear-btn.confirm { color: #e74c3c; font-weight: 600; }
+  .clear-btn:disabled { opacity: 0.4; cursor: not-allowed; }
   .chat-header {
     display: flex;
     align-items: center;

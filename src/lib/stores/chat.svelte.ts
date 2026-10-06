@@ -72,6 +72,25 @@ function createChatStore() {
     isStreaming = false;
   }
 
+  /** Drop the remnants of a failed send — the trailing empty assistant
+      bubble and its user message — and return the user text so the panel
+      can offer a one-click retry. A partially-streamed reply is left alone:
+      resending then would duplicate visible history. */
+  function removeFailedTurn(): string | null {
+    const last = messages[messages.length - 1];
+    let cut = messages.length;
+    if (last && last.role === 'assistant' && last.content === '' && !last.isStreaming) {
+      cut -= 1;
+    }
+    const maybeUser = messages[cut - 1];
+    if (maybeUser && maybeUser.role === 'user') {
+      messages = messages.slice(0, cut - 1);
+      return maybeUser.content;
+    }
+    messages = messages.slice(0, cut);
+    return null;
+  }
+
   function setInput(v: string): void { inputValue = v; }
   function clearInput(): void { inputValue = ''; }
   function setQuota(n: number): void { quotaRemaining = n; }
@@ -119,6 +138,7 @@ function createChatStore() {
     startStream,
     appendDelta,
     endStream,
+    removeFailedTurn,
     setInput,
     clearInput,
     setQuota,

@@ -29,10 +29,27 @@
   });
 </script>
 
-<div class="md">{@html html}</div>
+<div class="md">
+  {@html html}
+  {#if isStreaming}<span class="cursor" aria-hidden="true"></span>{/if}
+</div>
 
 <style>
   .md { font-size: 14px; }
+  /* Blinking caret at the tail of a streaming reply: "more is coming". */
+  .cursor {
+    display: inline-block;
+    width: 2px;
+    height: 1em;
+    margin-left: 2px;
+    vertical-align: -0.15em;
+    background: currentColor;
+    animation: cursor-blink 0.9s steps(2, start) infinite;
+  }
+  @keyframes cursor-blink { 50% { opacity: 0; } }
+  @media (prefers-reduced-motion: reduce) {
+    .cursor { animation: none; }
+  }
   .md :global(p) { margin: 0 0 8px; }
   .md :global(p:last-child) { margin-bottom: 0; }
   .md :global(pre) {

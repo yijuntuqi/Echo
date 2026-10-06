@@ -23,6 +23,20 @@
   let error = $state('');
   let busy = $state(false);
 
+  // Light format checks — advisory only; saving stays possible.
+  const keyWarning = $derived.by(() => {
+    const key = userApiKey.trim();
+    return key && !key.startsWith('sk-')
+      ? '常见 Key 以 “sk-” 开头，当前格式可能不对（仍可继续）'
+      : '';
+  });
+  const urlWarning = $derived.by(() => {
+    const url = userBaseUrl.trim();
+    return url && !/^https?:\/\//i.test(url)
+      ? '接口地址需以 http:// 或 https:// 开头（仍可继续）'
+      : '';
+  });
+
   function next() {
     error = '';
     if (step === 1) {
@@ -91,6 +105,8 @@
     <p class="lead">留空则使用内置共享额度（每日 200 次）。填入自己的 Key 可解除限制。</p>
     <TextField type="password" bind:value={userApiKey} placeholder="sk-..." />
     <TextField bind:value={userBaseUrl} placeholder="接口地址（可选，默认内置）" />
+    {#if keyWarning}<p class="warn" role="alert">⚠️ {keyWarning}</p>{/if}
+    {#if urlWarning}<p class="warn" role="alert">⚠️ {urlWarning}</p>{/if}
     <p class="tip">接口地址需为 OpenAI 兼容格式（如 https://api.openai.com/v1），仅搭配自己的 Key 生效。</p>
   {/if}
 
@@ -141,6 +157,7 @@
   }
 
   .error { font-size: 13px; color: #e74c3c; margin: 0; }
+  .warn { font-size: 12px; color: #e67e22; margin: 0; }
   .tip { font-size: 12px; color: var(--color-text-muted); margin: 0; }
   .actions { display: flex; justify-content: space-between; margin-top: 8px; }
 </style>

@@ -13,6 +13,14 @@
     oninput?: (text: string) => void;
   }>();
 
+  // Hard cap on one message: a huge paste would otherwise be sent verbatim
+  // to the API. `maxlength` enforces it on typing and pasting alike.
+  const MAX_INPUT = 2000;
+  // The counter only appears once the user is close to the cap.
+  const COUNT_FROM = MAX_INPUT - 200;
+  const counting = $derived(value.length >= COUNT_FROM);
+  const atLimit = $derived(value.length >= MAX_INPUT);
+
   function onKeydown(e: KeyboardEvent) {
     // Enter sends; Shift+Enter inserts a newline.
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -30,23 +38,35 @@
 </script>
 
 <div class="input-area">
-  <textarea
-    bind:value
-    {disabled}
-    {placeholder}
-    rows="1"
-    onkeydown={onKeydown}
-    oninput={() => oninput?.(value)}
-    aria-label="输入消息"
-  ></textarea>
-  <button onclick={submit} disabled={disabled || !value.trim()}>发送</button>
+  {#if counting}
+    <div class="count" class:limit={atLimit} aria-live="polite">{value.length} / {MAX_INPUT}</div>
+  {/if}
+  <div class="input-row">
+    <textarea
+      bind:value
+      {disabled}
+      {placeholder}
+      rows="1"
+      maxlength={MAX_INPUT}
+      onkeydown={onKeydown}
+      oninput={() => oninput?.(value)}
+      aria-label="输入消息"
+    ></textarea>
+    <button onclick={submit} disabled={disabled || !value.trim()}>发送</button>
+  </div>
 </div>
 
 <style>
   .input-area {
-    display: flex; gap: 8px; align-items: flex-end;
+    display: flex; flex-direction: column; gap: 4px;
     padding: 12px 16px; border-top: 1px solid var(--color-border);
   }
+  .count {
+    align-self: flex-end;
+    font-size: 10px; color: var(--color-text-muted);
+  }
+  .count.limit { color: #e74c3c; font-weight: 600; }
+  .input-row { display: flex; gap: 8px; align-items: flex-end; }
   textarea {
     flex: 1; resize: none;
     min-height: 40px; max-height: 120px;
