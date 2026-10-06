@@ -48,6 +48,10 @@ pub struct AppState {
     pub evolution: EvolutionEngine,
     pub scheduler: Scheduler,
     pub backup: BackupManager,
+    /// Cached profile nickname for prompt building; `None` when unset or
+    /// blank. Refreshed at every database open and on settings changes, so
+    /// `send_message` never has to query the table.
+    pub nickname: std::sync::RwLock<Option<String>>,
 }
 
 impl AppState {
@@ -63,6 +67,7 @@ impl AppState {
             vectors: VectorEngine::new(),
             scheduler: Scheduler::new(),
             backup: BackupManager::new(),
+            nickname: std::sync::RwLock::new(None),
         }
     }
 }

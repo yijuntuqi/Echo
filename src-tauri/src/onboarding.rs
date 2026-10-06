@@ -102,6 +102,7 @@ pub async fn complete_onboarding(
 
     // The key the user just typed (or left blank) becomes live immediately.
     apply_chat_key_from_db(pool).await;
+    refresh_nickname_cache().await;
 
     crate::window::show_main_window(&app);
     Ok(())
@@ -163,6 +164,7 @@ pub async fn open_existing(app: &AppHandle) -> Result<(), String> {
         .vectors
         .set_vec_available(manager.vec_available());
     apply_chat_key_from_db(manager.pool()).await;
+    refresh_nickname_cache().await;
     Ok(())
 }
 
@@ -189,4 +191,27 @@ pub async fn apply_chat_key_from_db(pool: &crate::db::DbPool) {
         None => (None, None),
     };
     crate::chat::apply_key(&crate::state().chat, key.as_deref(), base_url.as_deref()).await;
+}
+
+/// Cache `profiles.nickname` for prompt building. Blank means "none": the
+/// system prompt must never render an empty 「」. Called whenever the database
+/// opens and whenever the nickname changes, so reads never touch the table.
+pub async fn refresh_nickname_cache() {
+    let Ok(pool) = crate::pool() else {
+        return;
+    };
+    let nickname: Option<String> = sqlx::query("SELECT nickname FROM profiles WHERE id = 1")
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|row| {
+            use sqlx::Row;
+            let raw: String = row.get("nickname");
+            let trimmed = raw.trim().to_string();
+            (!trimmed.is_empty()).then_some(trimmed)
+        });
+    if let Ok(mut guard) = crate::state().nickname.write() {
+        *guard = nickname;
+    }
 }

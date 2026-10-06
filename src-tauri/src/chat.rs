@@ -4,11 +4,13 @@
 //! returned from the command, so the command resolves immediately and the UI
 //! can render tokens as they arrive.
 
+use std::collections::HashSet;
+
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tauri::Emitter;
 
-use crate::db::Conversation;
+use crate::db::{Conversation, VectorHit};
 
 /// SenseNova's OpenAI-compatible endpoint.
 pub const DEFAULT_BASE_URL: &str = "https://token.sensenova.cn/v1";
@@ -580,12 +582,29 @@ pub async fn send_message(app: tauri::AppHandle, message: String) -> Result<(), 
 
     let engine = &crate::state().chat;
     let history = recent_history(20).await;
+    // Turns replayed below are excluded from memory injection: injecting them
+    // again would spend the same prompt budget twice.
+    let replayed: HashSet<i64> = history.iter().map(|(id, _, _)| *id).collect();
 
-    // Oldest-first so the model reads the conversation in order.
-    let messages: Vec<ChatMessage> = std::iter::once(ChatMessage::system(SYSTEM_PROMPT))
-        .chain(history.into_iter().map(ChatMessage::assistant))
-        .chain(std::iter::once(ChatMessage::user(message.clone())))
-        .collect();
+    // Retrieval runs before the API call: it is local and bounded (300 ms),
+    // and its output shapes the system prompt.
+    let memories = retrieve_memories(&message, &replayed).await;
+    let nickname = current_nickname();
+
+    // Oldest-first so the model reads the conversation in order. Both sides of
+    // a replayed turn go in now (user messages used to be dropped, leaving the
+    // model to guess what it was replying to), each clipped so a few long
+    // turns cannot eat the whole context budget.
+    let mut messages: Vec<ChatMessage> = Vec::with_capacity(history.len() * 2 + 2);
+    messages.push(ChatMessage::system(build_system_prompt(
+        nickname.as_deref(),
+        &memories,
+    )));
+    for (_, user_msg, ai_msg) in history {
+        messages.push(ChatMessage::user(clip_chars(&user_msg, HISTORY_REPLAY_CLIP)));
+        messages.push(ChatMessage::assistant(clip_chars(&ai_msg, HISTORY_REPLAY_CLIP)));
+    }
+    messages.push(ChatMessage::user(message.clone()));
 
     let limit = engine.config().daily_limit;
     if !engine.quota.try_consume(limit).await {
@@ -666,6 +685,160 @@ const SYSTEM_PROMPT: &str = "\
 会关心对方的状态，也会有自己的小情绪。不要说自己是 AI 或语言模型。\
 用中文回答，除非用户使用其他语言。";
 
+// Memory-injection budget. Retrieval may fetch more than the cap so that
+// filtering (replayed turns, duplicates) cannot starve the prompt, but what
+// actually lands in the system prompt never exceeds MEMORY_TOP_K bullets and
+// MEMORY_BUDGET_CHARS characters.
+const MEMORY_TOP_K: usize = 3;
+const MEMORY_BUDGET_CHARS: usize = 600;
+/// One bullet's text is clipped first so a single long memory cannot crowd
+/// out everything else; at this size three full bullets always fit the budget.
+const MEMORY_CLIP: usize = 200;
+/// Fetch wider than the cap: the replayed-turn and dedup filters run between
+/// retrieval and injection.
+const MEMORY_FETCH_LIMIT: usize = 8;
+const MEMORY_QUERY_TIMEOUT_MS: u64 = 300;
+/// Replay-side clip: both halves of a stored turn, characters (not bytes —
+/// byte slicing would panic on a Chinese codepoint boundary).
+const HISTORY_REPLAY_CLIP: usize = 500;
+
+/// One memory bullet in the system prompt: a date and the text it refers to.
+struct MemoryBullet {
+    date: String,
+    content: String,
+}
+
+/// Char-boundary-safe truncation with an ellipsis when clipped.
+fn clip_chars(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(max).collect();
+    out.push('…');
+    out
+}
+
+/// The cached profile nickname, if the user set one.
+fn current_nickname() -> Option<String> {
+    crate::state()
+        .nickname
+        .read()
+        .ok()
+        .and_then(|guard| guard.clone())
+}
+
+/// The system prompt: the fixed persona, an always-on note that persistent
+/// memory exists and how to use it, plus the user's name and the retrieved
+/// memories when either is available. Absent pieces contribute nothing —
+/// never an empty 「」 or a dangling 【关于用户的记忆】 header. The memory
+/// note stays even on a turn with no name and no hits: history replay always
+/// runs, so the model must never claim amnesia.
+fn build_system_prompt(nickname: Option<&str>, memories: &[MemoryBullet]) -> String {
+    let mut prompt = String::from(SYSTEM_PROMPT);
+    prompt.push_str(
+        "\n你有持久记忆能力。每次对话开始时，你会收到：\n\
+         1. 用户的名字（如果用户设置过）\n\
+         2. 与当前话题相关的历史记忆（从你过去的对话里检索出来的）\n\
+         3. 最近的对话历史（用户和你的往返消息）\n\
+         请自然地使用这些记忆：\n\
+         - 如果用户问“你还记得我吗”，直接回答你记得的内容，不要道歉或说“我记不住”\n\
+         - 如果用户问“我是谁”，直接叫出他的名字\n\
+         - 不要主动说“我的记忆功能还在升级”或“每次都是全新开始”\n\
+         - 不要反复问用户“你是谁”或“你叫什么名字”",
+    );
+    if let Some(name) = nickname.map(str::trim).filter(|n| !n.is_empty()) {
+        prompt.push_str(&format!("\n用户的名字是「{name}」，你可以直接叫他的名字。"));
+    }
+    if !memories.is_empty() {
+        prompt.push_str("\n【关于用户的记忆】");
+        for m in memories {
+            prompt.push_str(&format!("\n- [{}] {}", m.date, m.content));
+        }
+        prompt.push_str("\n请自然地使用这些记忆，不要机械地复述。");
+    }
+    prompt
+}
+
+/// Memories for the system prompt: a search over the user's message, hardened
+/// for the reply path — a 300 ms ceiling and every failure downgraded to "no
+/// injection". Never blocks or fails the conversation.
+///
+/// [`crate::vector::search_memory`] encodes the query synchronously; on the
+/// coldest path (model files ready, session not yet warmed) that one-off load
+/// takes ~1 s inside the abandoned future and pins one runtime worker. The
+/// startup warm-up in `model::init` makes this a once-per-process corner, and
+/// the timeout keeps the reply itself unblocked.
+async fn retrieve_memories(query: &str, replayed: &HashSet<i64>) -> Vec<MemoryBullet> {
+    let started = std::time::Instant::now();
+    let search = crate::vector::search_memory(query.to_string(), MEMORY_FETCH_LIMIT);
+    let hits = match tokio::time::timeout(
+        std::time::Duration::from_millis(MEMORY_QUERY_TIMEOUT_MS),
+        search,
+    )
+    .await
+    {
+        Ok(Ok(hits)) => hits,
+        Ok(Err(e)) => {
+            tracing::debug!(error = %e, "memory injection: search failed");
+            return Vec::new();
+        }
+        Err(_) => {
+            tracing::warn!("memory injection: search exceeded 300ms; skipping");
+            return Vec::new();
+        }
+    };
+
+    let bullets = select_memories(hits, replayed);
+    let elapsed_ms = started.elapsed().as_millis() as u64;
+    if bullets.is_empty() {
+        tracing::debug!(elapsed_ms, "memory injection: nothing to inject");
+    } else {
+        tracing::info!(elapsed_ms, injected = bullets.len(), "memory injected into system prompt");
+    }
+    bullets
+}
+
+/// Filter, dedupe, and size-limit retrieved hits into injectable bullets.
+///
+/// Ascending distance is most-relevant-first for both real cosine distances
+/// and the deliberately conservative fake ones the keyword fallbacks emit.
+/// Conversation hits whose id is in `replayed` are dropped — those turns are
+/// about to be replayed verbatim; near-identical texts (same first 50
+/// characters) keep only their best-ranked copy; the budget drops whatever
+/// no longer fits, which by construction is the lower-relevance tail.
+fn select_memories(hits: Vec<VectorHit>, replayed: &HashSet<i64>) -> Vec<MemoryBullet> {
+    let mut hits = hits;
+    hits.sort_by(|a, b| a.distance.partial_cmp(&b.distance).unwrap_or(std::cmp::Ordering::Equal));
+
+    let mut seen_prefixes: HashSet<String> = HashSet::new();
+    let mut bullets: Vec<MemoryBullet> = Vec::new();
+    let mut used = 0usize;
+    for hit in hits {
+        if bullets.len() >= MEMORY_TOP_K {
+            break;
+        }
+        if hit.memory_type == "conversation" && replayed.contains(&hit.memory_id) {
+            continue;
+        }
+        let prefix: String = hit.content.chars().take(50).collect();
+        if !seen_prefixes.insert(prefix) {
+            continue;
+        }
+        let content = clip_chars(&hit.content, MEMORY_CLIP);
+        // Conversations carry RFC3339 timestamps, events bare dates — the
+        // first 10 characters are the YYYY-MM-DD both ways.
+        let date: String = hit.created_at.chars().take(10).collect();
+        // "- [date] content" — brackets, space, dash add six characters.
+        let len = date.chars().count() + content.chars().count() + 6;
+        if used + len > MEMORY_BUDGET_CHARS {
+            continue;
+        }
+        used += len;
+        bullets.push(MemoryBullet { date, content });
+    }
+    bullets
+}
+
 #[derive(serde::Serialize, Clone)]
 pub struct StreamChunk {
     pub delta: String,
@@ -686,14 +859,16 @@ pub struct StatusEvent {
     pub quota_remaining: Option<u32>,
 }
 
-/// Recent assistant turns, oldest-first, to give the model conversational
-/// continuity. Silently empty before onboarding has created the database.
-async fn recent_history(limit: i64) -> Vec<String> {
+/// Recent turns as `(id, user_message, ai_reply)`, oldest-first, to give the
+/// model conversational continuity. The ids let the memory-injection step
+/// skip turns that are about to be replayed verbatim. Silently empty before
+/// onboarding has created the database.
+async fn recent_history(limit: i64) -> Vec<(i64, String, String)> {
     let Ok(pool) = pool() else {
         return Vec::new();
     };
-    sqlx::query_scalar::<_, String>(
-        "SELECT ai_reply FROM conversations ORDER BY id DESC LIMIT ?",
+    sqlx::query_as::<_, (i64, String, String)>(
+        "SELECT id, user_message, ai_reply FROM conversations ORDER BY id DESC LIMIT ?",
     )
     .bind(limit)
     .fetch_all(pool)
@@ -1113,5 +1288,104 @@ mod tests {
         assert_eq!(count_after, count_before);
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn system_prompt_stays_quiet_without_nickname_or_memories() {
+        // Neither piece: persona plus the always-on memory-capability note,
+        // and nothing conditional — never an empty 「」 or a dangling
+        // 【关于用户的记忆】 header.
+        let base = build_system_prompt(None, &[]);
+        assert!(base.starts_with(SYSTEM_PROMPT));
+        assert!(base.contains("你有持久记忆能力"));
+        assert!(!base.contains("「」"));
+        assert!(!base.contains("【关于用户的记忆】"));
+        // A blank nickname must never render as 「」.
+        assert_eq!(build_system_prompt(Some("   "), &[]), base);
+
+        let full = build_system_prompt(
+            Some("张异"),
+            &[MemoryBullet {
+                date: "2026-10-06".into(),
+                content: "用户叫张异".into(),
+            }],
+        );
+        assert!(full.starts_with(SYSTEM_PROMPT));
+        assert!(full.contains("用户的名字是「张异」"));
+        assert!(full.contains("【关于用户的记忆】"));
+        assert!(full.contains("- [2026-10-06] 用户叫张异"));
+        assert!(full.contains("请自然地使用这些记忆，不要机械地复述。"));
+        // The capability note survives even when this turn retrieved nothing.
+        assert!(full.contains("你有持久记忆能力"));
+    }
+
+    #[test]
+    fn clip_chars_truncates_on_char_boundaries() {
+        assert_eq!(clip_chars("你好", 10), "你好");
+        assert_eq!(clip_chars("你好世界", 2), "你好…");
+        // A long run of multi-byte characters must not panic.
+        let long = "宠".repeat(1_000);
+        assert_eq!(clip_chars(&long, 500).chars().count(), 501);
+    }
+
+    fn hit(id: i64, kind: &str, distance: f32, created: &str, content: &str) -> VectorHit {
+        VectorHit {
+            memory_id: id,
+            memory_type: kind.into(),
+            distance,
+            created_at: created.into(),
+            content: content.into(),
+        }
+    }
+
+    #[test]
+    fn select_memories_drops_replayed_and_duplicates_then_caps_at_three() {
+        let replayed: HashSet<i64> = [10, 11].into_iter().collect();
+        let hits = vec![
+            hit(10, "conversation", 0.05, "2026-10-06T08:00:00Z", "这一轮正要被回放"),
+            hit(2, "conversation", 0.10, "2026-10-05T09:00:00Z", "我是张异，我喜欢打篮球"),
+            // Same first 50 characters as id 2: a duplicate, dropped.
+            hit(3, "conversation", 0.20, "2026-10-04T09:00:00Z", "我是张异，我喜欢打篮球"),
+            // An event whose numeric id collides with a replayed conversation:
+            // the replay filter is type-scoped, so it survives.
+            hit(10, "event", 0.30, "2026-10-01", "用户在做 Tauri 项目"),
+            hit(4, "conversation", 0.40, "2026-10-03T09:00:00Z", "第三条记忆"),
+            hit(5, "conversation", 0.50, "2026-10-02T09:00:00Z", "第四条记忆"),
+        ];
+        let bullets = select_memories(hits, &replayed);
+
+        assert_eq!(bullets.len(), 3);
+        assert_eq!(bullets[0].date, "2026-10-05"); // RFC3339 clipped to its date
+        assert_eq!(bullets[0].content, "我是张异，我喜欢打篮球");
+        assert_eq!(bullets[1].date, "2026-10-01"); // event date passes through
+        assert_eq!(bullets[2].content, "第三条记忆"); // cap: the fourth never lands
+        assert!(!bullets.iter().any(|b| b.content.contains("正要被回放")));
+    }
+
+    #[test]
+    fn select_memories_budget_drops_the_tail_not_the_head() {
+        // Three 200-char memories with distinct prefixes — identical content
+        // would be dropped by the dedup filter before the budget applies.
+        let long = |tag: &str| format!("{tag}{}", "好".repeat(197)); // 200 chars
+        let hits = vec![
+            hit(1, "event", 0.10, "2026-10-01", &long("记忆A")),
+            hit(2, "event", 0.20, "2026-10-02", &long("记忆B")),
+            hit(3, "event", 0.30, "2026-10-03", &long("记忆C")), // 3 × 216 = 648 > 600
+            hit(4, "event", 0.40, "2026-10-04", "短记忆"),
+        ];
+        let bullets = select_memories(hits, &HashSet::new());
+
+        // The third long bullet is dropped for budget; the short fourth still
+        // fits and is kept — what is dropped is what no longer fits, not
+        // everything after the first overflow.
+        assert_eq!(bullets.len(), 3);
+        assert!(bullets[0].content.starts_with("记忆A"));
+        assert!(bullets[1].content.starts_with("记忆B"));
+        assert_eq!(bullets[2].content, "短记忆");
+        let total: usize = bullets
+            .iter()
+            .map(|b| b.date.chars().count() + b.content.chars().count() + 6)
+            .sum();
+        assert!(total <= 600);
     }
 }

@@ -478,5 +478,9 @@ pub async fn update_settings(patch: serde_json::Value) -> Result<(), String> {
     if patch.get("user_api_key").is_some() {
         crate::onboarding::apply_chat_key_from_db(pool).await;
     }
+    // Keep the prompt-facing nickname cache in step with renames.
+    if patch.get("nickname").is_some() {
+        crate::onboarding::refresh_nickname_cache().await;
+    }
     Ok(())
 }
