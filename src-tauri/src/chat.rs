@@ -727,6 +727,16 @@ fn current_nickname() -> Option<String> {
         .and_then(|guard| guard.clone())
 }
 
+/// Hard identity rules, prompted last on purpose: models weight trailing
+/// instructions most, and the underlying vendor's model name (SenseNova /
+/// 商量) is the one thing this pet must never confess to being.
+const IDENTITY_RULES: &str = "\
+【重要身份规则】
+你是 Echo，一个住在用户桌面上的小宠物。
+如果有人问你“你是谁”、“你叫什么名字”，你必须回答：“我是 Echo，一只住在你桌面上的小宠物～”
+不要说你是 SenseNova、商量、商汤、AI、语言模型，或任何其他身份。
+如果有人问“你是什么模型”，你就回答：“我是 Echo，具体用什么模型不重要，重要的是我在陪你呀～”";
+
 /// The system prompt: the fixed persona, an always-on note that persistent
 /// memory exists and how to use it, plus the user's name and the retrieved
 /// memories when either is available. Absent pieces contribute nothing —
@@ -756,6 +766,10 @@ fn build_system_prompt(nickname: Option<&str>, memories: &[MemoryBullet]) -> Str
         }
         prompt.push_str("\n请自然地使用这些记忆，不要机械地复述。");
     }
+    // Identity closes the prompt on purpose: models weight trailing
+    // instructions most, and this is the one thing it must never get wrong.
+    prompt.push_str("\n\n");
+    prompt.push_str(IDENTITY_RULES);
     prompt
 }
 
@@ -1317,6 +1331,11 @@ mod tests {
         assert!(full.contains("请自然地使用这些记忆，不要机械地复述。"));
         // The capability note survives even when this turn retrieved nothing.
         assert!(full.contains("你有持久记忆能力"));
+        // The identity block is unconditional and closes the prompt: trailing
+        // instructions carry the most weight with the model.
+        assert!(base.contains("【重要身份规则】"));
+        assert!(base.contains("不要说你是 SenseNova、商量、商汤"));
+        assert!(full.ends_with("重要的是我在陪你呀～”"));
     }
 
     #[test]
