@@ -15,6 +15,11 @@ use crate::db::{Conversation, VectorHit};
 /// SenseNova's OpenAI-compatible endpoint.
 pub const DEFAULT_BASE_URL: &str = "https://token.sensenova.cn/v1";
 
+/// The default everyday model. A const (not just a Default field) so
+/// `set_model_preference` can restore it when the user switches back from
+/// the premium tier.
+pub const DEFAULT_DAILY_MODEL: &str = "sensenova-6.8-flash-lite";
+
 /// Environment variable carrying the official shared key. It can live in a
 /// gitignored local `.env` file (loaded by `dotenvy` in `lib.rs`) or be set
 /// in the process environment; it is never committed to the repository.
@@ -65,7 +70,7 @@ impl Default for ChatConfig {
             // Overwritten from settings by `apply_key`; empty means "bring
             // your own key" is still pending.
             api_key: shared_api_key(),
-            daily_model: "sensenova-6.8-flash-lite".into(),
+            daily_model: DEFAULT_DAILY_MODEL.into(),
             premium_model: "glm-5.2".into(),
             max_tokens: 2048,
             temperature: 0.8,
@@ -201,6 +206,19 @@ impl ChatEngine {
 
     pub fn config(&self) -> ChatConfig {
         self.config.read().expect("chat config lock poisoned").clone()
+    }
+
+    /// Apply the stored model preference. "premium" promotes every reply to
+    /// the premium model (scheduled recaps already used it); anything else
+    /// keeps the default daily/premium split. Called on every settings push,
+    /// so it must be idempotent — it is, being a pure overwrite.
+    pub fn set_model_preference(&self, pref: &str) {
+        let mut cfg = self.config.write().expect("chat config lock poisoned");
+        cfg.daily_model = if pref.trim().eq_ignore_ascii_case("premium") {
+            cfg.premium_model.clone()
+        } else {
+            DEFAULT_DAILY_MODEL.into()
+        };
     }
 
     /// The model to ask for on this request.
@@ -1064,6 +1082,23 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(outcome.model, expected);
+    }
+
+    #[test]
+    fn model_preference_promotes_and_restores() {
+        let engine = ChatEngine::new(ChatConfig::default());
+        let daily = DEFAULT_DAILY_MODEL;
+
+        engine.set_model_preference("premium");
+        let promoted = engine.config().daily_model.clone();
+        assert_eq!(promoted, engine.config().premium_model);
+
+        // Anything but "premium" (trimmed, case-insensitive) restores the
+        // default split — a stale or unknown value must not brick the model.
+        engine.set_model_preference(" premium ");
+        assert_eq!(engine.config().daily_model, promoted);
+        engine.set_model_preference("auto");
+        assert_eq!(engine.config().daily_model, daily);
     }
 
     #[tokio::test]

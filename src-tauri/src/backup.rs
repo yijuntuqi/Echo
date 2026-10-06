@@ -74,9 +74,35 @@ pub async fn run_automatic_backup(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(dest)
 }
 
+/// Export a snapshot. With `path` (chosen in the frontend save dialog) the
+/// file lands wherever the user picked; without, the default backups
+/// directory under a `echo-manual-` name that the auto-prune never sweeps.
 #[tauri::command]
-pub async fn export_backup(app: AppHandle) -> Result<String, String> {
-    let dest = run_automatic_backup(&app).await?;
+pub async fn export_backup(app: AppHandle, path: Option<String>) -> Result<String, String> {
+    let dest = match path {
+        Some(p) => {
+            let dest = PathBuf::from(p);
+            if let Some(parent) = dest.parent() {
+                if !parent.as_os_str().is_empty() {
+                    std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+                }
+            }
+            dest
+        }
+        None => {
+            let dir = BackupManager::default_dir(&app)?;
+            let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
+            dir.join(format!("echo-manual-{stamp}.echo.db"))
+        }
+    };
+
+    let pool = crate::pool()?;
+    // `VACUUM INTO` writes a consistent snapshot even with writes in flight.
+    let escaped = dest.to_string_lossy().replace('\'', "''");
+    sqlx::query(&format!("VACUUM INTO '{escaped}'"))
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
     Ok(dest.to_string_lossy().into_owned())
 }
 

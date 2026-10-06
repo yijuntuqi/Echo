@@ -461,7 +461,7 @@ pub async fn get_settings() -> Result<Settings, String> {
 }
 
 #[tauri::command]
-pub async fn update_settings(patch: serde_json::Value) -> Result<(), String> {
+pub async fn update_settings(app: AppHandle, patch: serde_json::Value) -> Result<(), String> {
     let pool = pool()?;
     let current = get_settings().await?;
     let mut merged = serde_json::to_value(current).map_err(|e| e.to_string())?;
@@ -474,13 +474,20 @@ pub async fn update_settings(patch: serde_json::Value) -> Result<(), String> {
         .await
         .map_err(|e| e.to_string())?;
 
-    // A swapped key takes effect on the next message without a restart.
-    if patch.get("user_api_key").is_some() {
+    // Key, endpoint, and model tier all land in the engine via one push.
+    if patch.get("user_api_key").is_some()
+        || patch.get("user_base_url").is_some()
+        || patch.get("model_preference").is_some()
+    {
         crate::onboarding::apply_chat_key_from_db(pool).await;
     }
     // Keep the prompt-facing nickname cache in step with renames.
     if patch.get("nickname").is_some() {
         crate::onboarding::refresh_nickname_cache().await;
+    }
+    // The autostart toggle must reach the OS, not just the settings blob.
+    if patch.get("auto_start").is_some() {
+        crate::onboarding::sync_autostart(&app).await;
     }
     Ok(())
 }

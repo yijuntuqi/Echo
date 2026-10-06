@@ -103,6 +103,7 @@ pub async fn complete_onboarding(
     // The key the user just typed (or left blank) becomes live immediately.
     apply_chat_key_from_db(pool).await;
     refresh_nickname_cache().await;
+    sync_autostart(&app).await;
 
     crate::window::show_main_window(&app);
     Ok(())
@@ -165,15 +166,17 @@ pub async fn open_existing(app: &AppHandle) -> Result<(), String> {
         .set_vec_available(manager.vec_available());
     apply_chat_key_from_db(manager.pool()).await;
     refresh_nickname_cache().await;
+    sync_autostart(app).await;
     Ok(())
 }
 
-/// Push the stored `user_api_key` / `user_base_url` (if any) into the chat
-/// engine.
+/// Push the stored `user_api_key` / `user_base_url` / `model_preference` (if
+/// any) into the chat engine. One function owns "settings blob -> engine" so
+/// startup, onboarding, and settings edits all behave the same.
 ///
 /// Best-effort: a malformed settings blob must not block startup.
 pub async fn apply_chat_key_from_db(pool: &crate::db::DbPool) {
-    let profile: Option<(String, Option<String>)> =
+    let profile: Option<(String, Option<String>, String)> =
         sqlx::query("SELECT settings_json FROM profiles WHERE id = 1")
             .fetch_optional(pool)
             .await
@@ -182,15 +185,91 @@ pub async fn apply_chat_key_from_db(pool: &crate::db::DbPool) {
             .and_then(|row| {
                 use sqlx::Row;
                 let json: String = row.get("settings_json");
-                serde_json::from_str::<Settings>(&json)
-                    .ok()
-                    .map(|s| (s.user_api_key.unwrap_or_default(), s.user_base_url))
+                serde_json::from_str::<Settings>(&json).ok().map(|s| {
+                    (
+                        s.user_api_key.unwrap_or_default(),
+                        s.user_base_url,
+                        s.model_preference,
+                    )
+                })
             });
-    let (key, base_url) = match profile {
-        Some((k, url)) => (Some(k), url),
-        None => (None, None),
+    let (key, base_url, preference) = match profile {
+        Some((k, url, pref)) => (Some(k), url, pref),
+        None => (None, None, "auto".to_string()),
     };
     crate::chat::apply_key(&crate::state().chat, key.as_deref(), base_url.as_deref()).await;
+    // The preference rides the same push; apply_key leaves the model fields
+    // alone, so this is the only writer of the daily model.
+    crate::state().chat.set_model_preference(&preference);
+}
+
+/// Mirror the stored `auto_start` setting into the OS autostart entry. The
+/// setting used to be saved but never applied — the plugin was initialised
+/// with nothing ever calling enable/disable. Best-effort: a registry failure
+/// must not block startup or saving.
+pub async fn sync_autostart(app: &AppHandle) {
+    let enabled = match crate::pool() {
+        Ok(pool) => {
+            let row: Option<(String,)> =
+                sqlx::query_as("SELECT settings_json FROM profiles WHERE id = 1")
+                    .fetch_optional(pool)
+                    .await
+                    .ok()
+                    .flatten();
+            match row.and_then(|(json,)| serde_json::from_str::<Settings>(&json).ok()) {
+                Some(s) => s.auto_start,
+                None => return,
+            }
+        }
+        // No database yet (first run): nothing to mirror.
+        Err(_) => return,
+    };
+    use tauri_plugin_autostart::ManagerExt;
+    let autolaunch = app.autolaunch();
+    let current = autolaunch.is_enabled().unwrap_or(false);
+    if current == enabled {
+        return;
+    }
+    let outcome = if enabled {
+        autolaunch.enable()
+    } else {
+        autolaunch.disable()
+    };
+    if let Err(e) = outcome {
+        tracing::warn!(enabled, error = %e, "autostart sync failed");
+    }
+}
+
+/// Delete the encrypted database and its keychain password, then restart the
+/// app. The escape hatch for a file that can no longer be opened (keychain
+/// entry lost or replaced, file damaged): without it the onboarding loop
+/// dead-ends on "wrong password" with no way forward. Destructive by
+/// definition — the frontend must confirm first.
+///
+/// The restart is structural, not cosmetic: the pool lives in a `OnceLock` (a
+/// one-way door), so only a fresh process gets a fresh door. After the
+/// restart there is no stored password, `open_existing` fails, and the
+/// frontend routes to a clean onboarding.
+#[tauri::command]
+pub async fn reset_database(app: AppHandle) -> Result<(), String> {
+    use tauri::Manager;
+
+    // Release SQLCipher's file handles first, or Windows refuses the delete.
+    if let Some(pool) = crate::state().db.get() {
+        pool.close().await;
+    }
+    forget_password();
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    for name in ["echo.db", "echo.db-wal", "echo.db-shm"] {
+        let path = dir.join(name);
+        match std::fs::remove_file(&path) {
+            Ok(()) => tracing::warn!(path = %path.display(), "reset removed database file"),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("无法删除 {}: {e}", path.display())),
+        }
+    }
+    tracing::warn!("database reset by user request; restarting");
+    app.restart()
 }
 
 /// Cache `profiles.nickname` for prompt building. Blank means "none": the

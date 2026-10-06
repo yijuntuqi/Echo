@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Core runtime permissions for the main and pet windows. Without a capability, every JS-side window/event API call (listen, setPosition, startDragging…) is silently rejected by the Tauri ACL.",
+  "description": "Core runtime permissions for the main and pet windows. Without a capability, every JS-side window/event API call (listen, setPosition, startDragging…) is silently rejected by the Tauri ACL. `dialog:default` opens the native file pickers (backup export now, import later) and the message/ask/confirm dialogs.",
   "windows": ["main", "pet"],
   "permissions": [
     "core:default",
@@ -10,6 +10,7 @@
     "core:window:allow-outer-position",
     "core:window:allow-set-size",
     "core:window:allow-current-monitor",
-    "core:window:allow-outer-size"
+    "core:window:allow-outer-size",
+    "dialog:default"
   ]
 }

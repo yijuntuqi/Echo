@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { completeOnboarding } from '$lib/api/commands';
+  import { completeOnboarding, resetDatabase } from '$lib/api/commands';
   import { goto } from '$lib/router';
   import Button from '$lib/components/ui/Button.svelte';
   import TextField from '$lib/components/ui/TextField.svelte';
@@ -22,6 +22,10 @@
   let autoStart = $state(true);
   let error = $state('');
   let busy = $state(false);
+  // The old-database escape hatch: the file exists but the keychain entry
+  // can no longer open it, which used to dead-end on "wrong password".
+  let showReset = $state(false);
+  let resetting = $state(false);
 
   // Light format checks — advisory only; saving stays possible.
   const keyWarning = $derived.by(() => {
@@ -68,9 +72,32 @@
       document.documentElement.dataset.theme = theme;
       goto('/');
     } catch (e) {
-      error = '保存失败：' + e;
+      const msg = typeof e === 'string' ? e : String(e);
+      if (msg.includes('wrong password') || msg.includes('not a database')) {
+        // An encrypted database from a previous install exists and the freshly
+        // generated password cannot open it. Offer the reset instead of a
+        // dead-end error the user can only hit again.
+        showReset = true;
+      } else {
+        error = '保存失败：' + msg;
+      }
     } finally {
       busy = false;
+    }
+  }
+
+  async function doReset() {
+    resetting = true;
+    try {
+      // Success never resolves: the backend deletes the database and
+      // restarts the app into a clean onboarding. Reaching this line means
+      // the restart did not happen.
+      await resetDatabase();
+      error = '重置未完成，请手动重启应用后重试';
+    } catch (e) {
+      error = '重置失败：' + e;
+    } finally {
+      resetting = false;
     }
   }
 </script>
@@ -120,6 +147,26 @@
   </div>
 </div>
 
+{#if showReset}
+  <div class="reset-backdrop" role="alertdialog" aria-modal="true" aria-label="重置数据库确认">
+    <div class="reset-dialog">
+      <h3>⚠️ 旧数据库无法打开</h3>
+      <p>
+        本机已有一份 Echo 数据库，但当前无法解密（密码不匹配或文件损坏）。
+        重置会删除它的全部内容（对话、记忆、事件），此操作无法恢复。
+      </p>
+      <div class="reset-actions">
+        <Button variant="secondary" onclick={() => (showReset = false)} disabled={resetting}>
+          取消
+        </Button>
+        <button class="danger-btn" onclick={doReset} disabled={resetting}>
+          {resetting ? '正在重置…' : '重置并重新开始'}
+        </button>
+      </div>
+    </div>
+  </div>
+{/if}
+
 <style>
   .onboarding {
     max-width: 460px;
@@ -158,6 +205,37 @@
 
   .error { font-size: 13px; color: #e74c3c; margin: 0; }
   .warn { font-size: 12px; color: #e67e22; margin: 0; }
+
+  .reset-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 9999;
+    display: grid;
+    place-items: center;
+    background: rgba(0, 0, 0, 0.45);
+  }
+  .reset-dialog {
+    width: min(420px, calc(100vw - 48px));
+    padding: 24px;
+    background: var(--color-bg-panel);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-strong);
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+  .reset-dialog h3 { margin: 0; font-size: 1.1rem; }
+  .reset-dialog p { margin: 0; font-size: 13px; color: var(--color-text-muted); line-height: 1.6; }
+  .reset-actions { display: flex; justify-content: flex-end; gap: 10px; }
+  .danger-btn {
+    padding: 9px 16px; font-size: 13px; font-weight: 500;
+    color: #e74c3c; background: none;
+    border: 1px solid #e74c3c;
+    border-radius: var(--radius-sm); cursor: pointer;
+  }
+  .danger-btn:hover:not(:disabled) { background: #e74c3c; color: #fff; }
+  .danger-btn:disabled { opacity: 0.5; cursor: not-allowed; }
   .tip { font-size: 12px; color: var(--color-text-muted); margin: 0; }
   .actions { display: flex; justify-content: space-between; margin-top: 8px; }
 </style>

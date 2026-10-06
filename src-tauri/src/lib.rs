@@ -211,6 +211,7 @@ pub fn run() {
             // onboarding
             onboarding::complete_onboarding,
             onboarding::get_onboarding_status,
+            onboarding::reset_database,
         ])
         .run(tauri::generate_context!())
         .expect("failed to start Echo");

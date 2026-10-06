@@ -67,6 +67,18 @@ export const forceEvolve = (stage: EvolutionStage): Promise<void> =>
 export const getSettings = (): Promise<Settings> => invoke('get_settings');
 export const updateSettings = (patch: Partial<Settings>): Promise<void> =>
   invoke('update_settings', { patch });
+/**
+ * Snapshot the (still-encrypted) database to `path` — chosen in a save
+ * dialog — or to the default backups directory when omitted. Returns the
+ * path the file was written to.
+ */
+export const exportBackup = (path?: string): Promise<string> =>
+  invoke('export_backup', { path: path ?? null });
+/**
+ * Delete the database and its stored password, then restart the app. The
+ * backend never resolves: success ends the process.
+ */
+export const resetDatabase = (): Promise<void> => invoke('reset_database');
 
 // --- system ----------------------------------------------------------------
 export const checkUpdates = (): Promise<UpdateInfo> => invoke('check_updates');
