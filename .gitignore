@@ -16,7 +16,9 @@ vite.config.ts.timestamp-*
 
 # Tauri
 src-tauri/target/
-src-tauri/gen/
+# Only the desktop build's generated schemas stay ignored; the Android
+# project (gen/android) is tracked so CI can build it without re-running init.
+src-tauri/gen/schemas/
 **/*.d.ts
 
 # IDE
