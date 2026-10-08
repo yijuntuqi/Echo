@@ -73,4 +73,4 @@ playwright-report/
 # Misc
 *.pid
 *.seed
-*.pid.lock
+*.pid.lock*.idsig 
